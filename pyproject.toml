@@ -1,0 +1,58 @@
+[project]
+name = "innovationist-tech-demo-api"
+version = "1.0.0"
+description = "Innovationist Technology Solutions — Demo API"
+readme = "README.md"
+requires-python = ">=3.13"
+
+dependencies = [
+    "fastapi>=0.138.2",
+    "uvicorn[standard]",
+    "pydantic[email]",
+    "pydantic-settings",
+    "beanie",
+    "pymongo",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9.0",
+    "mypy>=1.10.0",
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",
+    "pre-commit>=4.0.0",
+]
+
+[tool.ruff]
+line-length = 88
+fix = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/main.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.mypy]
+strict = true
+warn_unused_configs = true
+warn_return_any = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+disable_error_code = ["type-arg"]
+plugins = ["pydantic.mypy"]
+
+[tool.pydantic-mypy]
+init_typed = true
+warn_required_dynamic_aliases = true
