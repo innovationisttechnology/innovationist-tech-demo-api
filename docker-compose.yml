@@ -40,6 +40,10 @@ services:
     volumes:
       - demo_mongo_data:/data/db
       - demo_mongo_search:/data/mongot
+      # Persist the replica-set keyfile too, otherwise a second `up` fails:
+      # /data/db keeps the initialized auth'd replica set while the keyfile in
+      # /data/configdb would be regenerated, and the two disagree on restart.
+      - demo_mongo_config:/data/configdb
     healthcheck:
       test: ["CMD", "mongosh", "--quiet", "mongodb://localhost:27017/admin", "--eval", "db.runCommand({ ping: 1 })"]
       interval: 10s
@@ -64,3 +68,4 @@ services:
 volumes:
   demo_mongo_data:
   demo_mongo_search:
+  demo_mongo_config:
