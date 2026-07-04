@@ -1,0 +1,66 @@
+# Self-contained local stack for the demo API.
+# Host ports are deliberately offset from the old project's stack
+# (27017 / 8081) so both can run side by side:
+#   API           -> http://localhost:8181
+#   MongoDB        -> localhost:27018  (container 27017)
+#   mongo-express  -> http://localhost:8281
+services:
+  api:
+    build: .
+    image: innovationist-tech-demo-api:latest
+    container_name: innovationist-demo-api
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "8181:8181"
+    environment:
+      APP_NAME: "Innovationist Tech Demo API"
+      ENVIRONMENT: development
+      PORT: "8181"
+      CORS_ORIGINS: "http://localhost:3001"
+      MONGO_DB_NAME: innovationist_demo
+      # Connects to the `mongo` service on the compose network (not the host).
+      # directConnection=true is required to talk to atlas-local's single-node
+      # replica set, which is what makes change streams work.
+      MONGO_URI: "mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-adminpassword}@mongo:27017/innovationist_demo?authSource=admin&directConnection=true"
+
+  mongo:
+    # atlas-local ships a single-node replica set out of the box — change
+    # streams need a replica set, a plain `mongo` image would not suffice.
+    image: mongodb/mongodb-atlas-local:latest
+    container_name: innovationist-demo-mongo
+    restart: unless-stopped
+    ports:
+      - "27018:27017"
+    environment:
+      - MONGODB_INITDB_ROOT_USERNAME=${MONGO_ROOT_USER:-admin}
+      - MONGODB_INITDB_ROOT_PASSWORD=${MONGO_ROOT_PASSWORD:-adminpassword}
+    volumes:
+      - demo_mongo_data:/data/db
+      - demo_mongo_search:/data/mongot
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "mongodb://localhost:27017/admin", "--eval", "db.runCommand({ ping: 1 })"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+
+  mongo-express:
+    image: mongo-express:1
+    container_name: innovationist-demo-mongo-express
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - "8281:8081"
+    environment:
+      - ME_CONFIG_MONGODB_ADMINUSERNAME=${MONGO_ROOT_USER:-admin}
+      - ME_CONFIG_MONGODB_ADMINPASSWORD=${MONGO_ROOT_PASSWORD:-adminpassword}
+      - ME_CONFIG_MONGODB_URL=mongodb://${MONGO_ROOT_USER:-admin}:${MONGO_ROOT_PASSWORD:-adminpassword}@mongo:27017/?authSource=admin
+
+volumes:
+  demo_mongo_data:
+  demo_mongo_search:

@@ -1,0 +1,32 @@
+# Local virtualenv — the image builds its own with uv
+.venv
+
+# VCS & editor
+.git
+.github
+.idea
+.qodo
+
+# Tooling caches
+.mypy_cache
+.pytest_cache
+.ruff_cache
+__pycache__/
+*.py[oc]
+*.egg-info
+build/
+dist/
+wheels/
+
+# Secrets & local env — env is passed in at runtime, never baked into the image
+.env
+.env.*
+!.env.example
+
+# Docker & docs (not needed inside the image)
+Dockerfile
+docker-compose.yml
+.dockerignore
+.pre-commit-config.yaml
+*.md
+tests

@@ -52,7 +52,9 @@ async def update_flag(
 
 
 async def soft_delete_flag(flag: SyncFlag) -> SyncFlag:
+    now = utc_now()
     flag.deleted = True
-    flag.updated_at = utc_now()
+    flag.updated_at = now
+    flag.deleted_at = now
     await flag.save()
     return flag

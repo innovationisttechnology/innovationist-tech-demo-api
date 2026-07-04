@@ -1,9 +1,11 @@
 from datetime import datetime
+from typing import Optional
 
 from beanie import Document
 from pydantic import Field
 from pymongo import IndexModel
 
+from app.core.config import settings
 from app.core.utils.time import utc_now
 
 
@@ -21,6 +23,7 @@ class SyncFlag(Document):
     deleted: bool = False
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
+    deleted_at: Optional[datetime] = None
 
     class Settings:
         name = "sync_flags"
@@ -32,5 +35,22 @@ class SyncFlag(Document):
                 unique=True,
                 name="uniq_active_session_key",
                 partialFilterExpression={"deleted": False},
+            ),
+            # Fast tombstone cleanup: purge soft-deleted flags
+            # `tombstone_ttl_seconds` after deletion. Keyed on deleted_at (only
+            # set on tombstones) so live flags are never expired by it.
+            IndexModel(
+                [("deleted_at", 1)],
+                name="ttl_deleted_flags",
+                expireAfterSeconds=settings.tombstone_ttl_seconds,
+                partialFilterExpression={"deleted": True},
+            ),
+            # Abandoned-session cleanup: purge any flag with no activity for
+            # `session_ttl_seconds`. updated_at refreshes on every write, so
+            # only genuinely idle sessions expire. Covers live + deleted flags.
+            IndexModel(
+                [("updated_at", 1)],
+                name="ttl_idle_flags",
+                expireAfterSeconds=settings.session_ttl_seconds,
             ),
         ]

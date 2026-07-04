@@ -3,7 +3,8 @@ SHELL := /bin/bash
 VENV := .venv
 PY := $(VENV)/bin/python
 
-.PHONY: install dev dev-debug start format lint test mypy check
+.PHONY: install dev dev-debug start format lint test mypy check \
+	docker-build docker-up docker-down docker-logs
 
 install:
 	uv sync
@@ -31,3 +32,15 @@ mypy:
 	$(PY) -m mypy app tests
 
 check: lint mypy test
+
+docker-build:
+	docker compose build
+
+docker-up:
+	docker compose up -d
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f api
