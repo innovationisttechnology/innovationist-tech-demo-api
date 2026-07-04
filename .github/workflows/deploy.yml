@@ -42,9 +42,9 @@ jobs:
       - name: Tests (pytest)
         run: uv run pytest
 
-      # Build & push only from main; PRs and feature branches stop after tests.
+      # The image is built on every run to validate the Dockerfile, but only
+      # pushed from main. Feature branches / PRs build without pushing.
       - name: Set up Docker Buildx
-        if: github.ref_name == 'main'
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to Docker Hub
@@ -54,12 +54,11 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build and push Docker image
-        if: github.ref_name == 'main'
+      - name: Build Docker image (push only on main)
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ github.ref_name == 'main' }}
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/innovationist-tech-demo-api:latest
             ${{ secrets.DOCKER_USERNAME }}/innovationist-tech-demo-api:${{ github.sha }}

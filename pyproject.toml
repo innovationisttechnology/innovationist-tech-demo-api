@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings",
     "beanie",
     "pymongo",
+    "pydantic-ai>=2.5.0",
 ]
 
 [tool.setuptools.packages.find]
