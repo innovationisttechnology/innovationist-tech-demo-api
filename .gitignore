@@ -10,3 +10,8 @@ wheels/
 .venv
 
 .idea
+
+# Local environment / secrets — never commit real values
+.env
+.env.*
+!.env.example
