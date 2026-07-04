@@ -44,6 +44,9 @@ known-first-party = ["app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+    "integration: tests that require a live MongoDB replica set (skipped unless TEST_MONGO_URI is set)",
+]
 
 [tool.mypy]
 strict = true
