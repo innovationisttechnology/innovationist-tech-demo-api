@@ -6,13 +6,16 @@ from pymongo.asynchronous.database import AsyncDatabase
 
 from app.content_sync.models import SyncFlag
 from app.core.config import settings
+from app.core.db.index_migrations import reconcile_indexes
+from app.ziza_chat.caption_cache import CachedCaption
+from app.ziza_chat.vector_store.models import KnowledgeChunk
 
 _client: AsyncMongoClient[Any] | None = None
 
 
 def get_document_models() -> List[Type[Document]]:
     """Register all Beanie Document models here as the project grows."""
-    return [SyncFlag]
+    return [SyncFlag, KnowledgeChunk, CachedCaption]
 
 
 def is_db_configured() -> bool:
@@ -35,6 +38,8 @@ def get_db() -> AsyncDatabase[Any]:
 async def init_db() -> None:
     document_models = get_document_models()
     assert_models(document_models)
+    # Must precede init_beanie, which cannot change an existing index.
+    await reconcile_indexes(get_db(), document_models)
 
     await init_beanie(
         database=get_db(),

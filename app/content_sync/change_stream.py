@@ -1,5 +1,9 @@
 import asyncio
 import logging
+from typing import Any
+
+from pydantic import ValidationError
+from pymongo.errors import PyMongoError
 
 from app.content_sync.connection_manager import ConnectionManager
 from app.content_sync.events import format_sse
@@ -8,13 +12,30 @@ from app.content_sync.schemas import SyncEvent, SyncFlagRead
 
 logger = logging.getLogger(__name__)
 
+RESTART_DELAY_SECONDS = 5
 
-def _event_type(operation: str, doc: dict[str, object]) -> str:
+
+def _event_type(operation: str, doc: dict[str, Any]) -> str:
     if doc.get("deleted"):
         return "flag.deleted"
     if operation == "insert":
         return "flag.created"
     return "flag.updated"
+
+
+def _to_event(operation: str, doc: dict[str, Any]) -> tuple[str, SyncEvent]:
+    """Build the event and the session it belongs to. Raises KeyError or
+    ValidationError if the document doesn't match the schema."""
+    flag = SyncFlagRead(
+        session_id=doc["session_id"],
+        key=doc["key"],
+        value=doc["value"],
+        enabled=doc["enabled"],
+        created_at=doc["created_at"],
+        updated_at=doc["updated_at"],
+    )
+    event = SyncEvent(type=_event_type(operation, doc), key=flag.key, flag=flag)
+    return flag.session_id, event
 
 
 async def watch_sync_flags(manager: ConnectionManager) -> None:
@@ -42,17 +63,18 @@ async def watch_sync_flags(manager: ConnectionManager) -> None:
                     if doc is None:
                         continue
 
-                    event_type = _event_type(change["operationType"], doc)
-                    flag = SyncFlagRead(
-                        session_id=doc["session_id"],
-                        key=doc["key"],
-                        value=doc["value"],
-                        enabled=doc["enabled"],
-                        created_at=doc["created_at"],
-                        updated_at=doc["updated_at"],
-                    )
-                    event = SyncEvent(type=event_type, key=flag.key, flag=flag)
-                    await manager.broadcast(doc["session_id"], format_sse(event))
-        except Exception:
+                    try:
+                        session_id, event = _to_event(change["operationType"], doc)
+                    except (KeyError, ValidationError):
+                        logger.exception(
+                            "Skipping malformed sync flag document %s",
+                            doc.get("_id"),
+                        )
+                        continue
+
+                    await manager.broadcast(session_id, format_sse(event))
+        except PyMongoError:
+            # Connection drops and change-stream invalidation are the transient
+            # failures this loop exists to survive.
             logger.exception("Sync flag change stream error — restarting")
-            await asyncio.sleep(5)
+            await asyncio.sleep(RESTART_DELAY_SECONDS)

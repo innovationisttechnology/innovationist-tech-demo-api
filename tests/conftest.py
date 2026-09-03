@@ -1,5 +1,6 @@
 import os
 
+import pydantic_ai.models
 import pytest
 
 from app.core.config import settings
@@ -9,6 +10,19 @@ from app.core.config import settings
 # run needs no infrastructure.
 _TEST_MONGO_URI = os.environ.get("TEST_MONGO_URI")
 
+pydantic_ai.models.ALLOW_MODEL_REQUESTS = False
+
+# Agent construction requires a provider key even though tests never call the
+# provider (models are overridden with TestModel); a placeholder satisfies
+# that check without granting real access.
+os.environ.setdefault("ANTHROPIC_API_KEY", "test-placeholder-key")
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    """Run @pytest.mark.anyio tests on asyncio only (trio isn't installed)."""
+    return "asyncio"
+
 
 @pytest.fixture(autouse=True)
 def configure_database(
@@ -17,8 +31,8 @@ def configure_database(
     """Point the app at the right database for each test tier.
 
     - Unit tests run hermetically with no database: booting the app via
-      TestClient starts in "no database" mode (health reports `not_configured`,
-      the change-stream watcher is skipped).
+      TestClient starts in "no database" mode (the change-stream watcher is
+      skipped).
     - Tests marked `integration` run against the real MongoDB replica set given
       by TEST_MONGO_URI, using a dedicated `innovationist_test` database. They
       are skipped when TEST_MONGO_URI is unset.
