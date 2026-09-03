@@ -3,7 +3,6 @@ from app.core.utils.log_config import init_logging
 init_logging()
 
 import asyncio
-import contextlib
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
@@ -39,8 +38,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     connection_manager.close_all()
     if watcher_task is not None:
         watcher_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
+        try:
             await watcher_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            # The watcher only restarts itself for transient database errors;
+            # anything else ends the task and is re-raised here. Shutdown must
+            # still complete, so it is reported rather than propagated.
+            logger.exception("Sync flag watcher had already failed")
     await close_db()
 
 
