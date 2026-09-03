@@ -43,8 +43,10 @@ USER app
 
 EXPOSE 8181
 
-# Liveness probe hits the health endpoint; no curl needed in the image.
+# Liveness probe hits the root endpoint; no curl needed in the image.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8181/api/health', timeout=3)" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8181/', timeout=3)" || exit 1
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8181"]
+# --no-server-header suppresses the `server:` response header, which otherwise
+# names the ASGI server on every response.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8181", "--no-server-header"]

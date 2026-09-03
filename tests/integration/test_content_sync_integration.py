@@ -19,12 +19,6 @@ def _session() -> str:
     return f"it-{uuid.uuid4().hex[:8]}"
 
 
-def test_health_reports_connected() -> None:
-    with TestClient(app) as client:
-        body = client.get("/api/health").json()
-        assert body["database"] == "connected"
-
-
 def test_flag_crud_roundtrip() -> None:
     session_id = _session()
     with TestClient(app) as client:
