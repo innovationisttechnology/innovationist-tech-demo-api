@@ -21,9 +21,8 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
-# Bake the embedding model into the image. Otherwise fastembed downloads it to
-# a temp directory on the first request that needs an embedding — ~130MB, lost
-# on every container restart, and a hard failure if HuggingFace is unreachable.
+# Without this fastembed downloads the model at runtime, into a temp directory
+# that is lost on every container restart.
 ARG EMBEDDING_MODEL_ID="BAAI/bge-small-en-v1.5"
 ENV FASTEMBED_CACHE_PATH=/opt/fastembed_cache
 RUN uv run python -c "\

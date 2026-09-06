@@ -38,8 +38,6 @@ logger = logging.getLogger(__name__)
 
 
 def warn_about_missing_provider_key() -> None:
-    """Agents are constructed lazily, so a missing key lets the app boot and
-    pass its healthcheck while every /api/ziza request fails. Say so at boot."""
     if not os.getenv("ANTHROPIC_API_KEY"):
         logger.error(
             "ANTHROPIC_API_KEY is not set — the /api/ziza endpoints will fail "

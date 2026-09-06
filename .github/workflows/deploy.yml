@@ -108,9 +108,6 @@ jobs:
     if: github.ref_name == 'main'
 
     steps:
-      # Agents are built lazily, so a missing provider key does not stop the
-      # container booting — it fails every /api/ziza request instead, with a
-      # healthy container and a green deploy. Fail here rather than there.
       - name: Verify required secrets are set
         env:
           REQUIRED: >-
