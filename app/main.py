@@ -11,6 +11,7 @@ init_logging()
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -36,8 +37,19 @@ from app.ziza_chat.vector_store.index import ensure_vector_index
 logger = logging.getLogger(__name__)
 
 
+def warn_about_missing_provider_key() -> None:
+    """Agents are constructed lazily, so a missing key lets the app boot and
+    pass its healthcheck while every /api/ziza request fails. Say so at boot."""
+    if not os.getenv("ANTHROPIC_API_KEY"):
+        logger.error(
+            "ANTHROPIC_API_KEY is not set — the /api/ziza endpoints will fail "
+            "on every request. Set it in the deployment environment."
+        )
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    warn_about_missing_provider_key()
     watcher_task: asyncio.Task[None] | None = None
     if is_db_configured():
         await init_db()

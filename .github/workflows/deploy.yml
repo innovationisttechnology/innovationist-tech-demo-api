@@ -108,6 +108,33 @@ jobs:
     if: github.ref_name == 'main'
 
     steps:
+      # Agents are built lazily, so a missing provider key does not stop the
+      # container booting — it fails every /api/ziza request instead, with a
+      # healthy container and a green deploy. Fail here rather than there.
+      - name: Verify required secrets are set
+        env:
+          REQUIRED: >-
+            ANTHROPIC_API_KEY EC2_HOST EC2_USER EC2_SSH_KEY
+            DOCKER_USERNAME DOCKER_PASSWORD MONGO_URI CORS_ORIGINS
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}
+          CORS_ORIGINS: ${{ secrets.CORS_ORIGINS }}
+        run: |
+          missing=""
+          for name in $REQUIRED; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "Missing repository secrets:$missing" >&2
+            exit 1
+          fi
+          echo "All required secrets are set."
+
       - name: Deploy on EC2 (pull + restart container)
         uses: appleboy/ssh-action@v1.2.5
         with:
@@ -139,6 +166,7 @@ jobs:
             CORS_ORIGINS=${{ secrets.CORS_ORIGINS }}
             MONGO_URI=${{ secrets.MONGO_URI }}
             MONGO_DB_NAME=${{ secrets.MONGO_DB_NAME }}
+            ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
             EOF
             chmod 600 "$APP_DIR/.env"
 
