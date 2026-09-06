@@ -21,12 +21,21 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
+# Without this fastembed downloads the model at runtime, into a temp directory
+# that is lost on every container restart.
+ARG EMBEDDING_MODEL_ID="BAAI/bge-small-en-v1.5"
+ENV FASTEMBED_CACHE_PATH=/opt/fastembed_cache
+RUN uv run python -c "\
+from fastembed import TextEmbedding; \
+TextEmbedding(model_name='${EMBEDDING_MODEL_ID}')"
+
 # ---- runtime: slim image carrying just the venv + source ----
 FROM python:3.13-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/app/.venv/bin:$PATH" \
+    FASTEMBED_CACHE_PATH=/opt/fastembed_cache
 
 # CA certificates for TLS to MongoDB (e.g. Atlas).
 RUN apt-get update \
@@ -38,6 +47,7 @@ RUN groupadd --system app && useradd --system --gid app --home-dir /app app
 WORKDIR /app
 
 COPY --from=builder --chown=app:app /app /app
+COPY --from=builder --chown=app:app /opt/fastembed_cache /opt/fastembed_cache
 
 USER app
 
