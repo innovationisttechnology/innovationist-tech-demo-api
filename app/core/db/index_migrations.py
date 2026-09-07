@@ -25,21 +25,28 @@ SUPERSEDED_INDEXES: dict[str, tuple[str, ...]] = {
 }
 
 
+def declared_settings(model: Type[Document]) -> Any:
+    # Beanie reads the inner `Settings` class by reflection and never declares
+    # it on Document, so a model is free not to have one.
+    return getattr(model, "Settings", None)
+
+
 def collection_name(model: Type[Document]) -> str:
-    return str(getattr(model.Settings, "name", model.__name__.lower()))
+    name = getattr(declared_settings(model), "name", None)
+    return str(name or model.__name__.lower())
 
 
 def declared_ttl_indexes(model: Type[Document]) -> dict[str, int]:
     """TTL indexes the model declares, as {index name: expireAfterSeconds}."""
     declared: dict[str, int] = {}
-    for index in getattr(model.Settings, "indexes", []) or []:
+    for index in getattr(declared_settings(model), "indexes", []) or []:
         if not isinstance(index, IndexModel):
             continue
         specification: dict[str, Any] = index.document
         name = specification.get("name")
         ttl_seconds = specification.get("expireAfterSeconds")
-        if name and ttl_seconds is not None:
-            declared[str(name)] = int(ttl_seconds)
+        if isinstance(name, str) and name and isinstance(ttl_seconds, (int, float)):
+            declared[name] = int(ttl_seconds)
     return declared
 
 

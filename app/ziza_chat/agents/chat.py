@@ -1,9 +1,12 @@
 from functools import lru_cache
 
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import ProcessHistory
+from pydantic_ai.models.anthropic import AnthropicModelSettings
 
 from app.ziza_chat.config import ziza_settings
 from app.ziza_chat.deps import ChatDeps
+from app.ziza_chat.history_store.trimming import trim_to_recent_turns
 from app.ziza_chat.tools.common import current_datetime, search_knowledge_base
 
 SYSTEM_PROMPT = """\
@@ -75,6 +78,12 @@ def get_chat_agent() -> Agent[ChatDeps, str]:
         output_type=str,
         instructions=SYSTEM_PROMPT,
         tools=[search_knowledge_base, current_datetime],
+        capabilities=[ProcessHistory(trim_to_recent_turns)],
+        model_settings=AnthropicModelSettings(
+            anthropic_cache_instructions=True,
+            anthropic_cache_tool_definitions=True,
+            anthropic_cache=True,
+        ),
     )
 
     @agent.instructions

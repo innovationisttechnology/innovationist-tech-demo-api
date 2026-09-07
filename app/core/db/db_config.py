@@ -8,6 +8,7 @@ from app.content_sync.models import SyncFlag
 from app.core.config import settings
 from app.core.db.index_migrations import reconcile_indexes
 from app.ziza_chat.caption_cache import CachedCaption
+from app.ziza_chat.history_store.models import ConversationSummary, ConversationTurn
 from app.ziza_chat.vector_store.models import KnowledgeChunk
 
 _client: AsyncMongoClient[Any] | None = None
@@ -15,7 +16,13 @@ _client: AsyncMongoClient[Any] | None = None
 
 def get_document_models() -> List[Type[Document]]:
     """Register all Beanie Document models here as the project grows."""
-    return [SyncFlag, KnowledgeChunk, CachedCaption]
+    return [
+        SyncFlag,
+        KnowledgeChunk,
+        CachedCaption,
+        ConversationTurn,
+        ConversationSummary,
+    ]
 
 
 def is_db_configured() -> bool:

@@ -4,6 +4,8 @@ from pathlib import PurePosixPath
 from typing import AsyncIterator
 from urllib.parse import urlparse
 
+from pydantic_ai.usage import UsageLimits
+
 from app.core.db.db_config import is_db_configured
 from app.ziza_chat.agents.chat import get_chat_agent
 from app.ziza_chat.agents.classifier import get_classifier_agent
@@ -25,6 +27,12 @@ from app.ziza_chat.document_loaders import (
     load_document,
 )
 from app.ziza_chat.document_loaders.web import fetch_page, html_to_text
+from app.ziza_chat.history_store.service import (
+    append_turn,
+    clear_history,
+    load_history,
+    record_refusal,
+)
 from app.ziza_chat.schemas import (
     ChatRequest,
     ChatResponse,
@@ -154,10 +162,14 @@ async def build_chat_deps(session_id: str, intent: str) -> ChatDeps:
     )
 
 
+CHAT_USAGE_LIMITS = UsageLimits(request_limit=5, tool_calls_limit=6)
+
+
 async def chat(request: ChatRequest) -> ChatResponse:
     classification = await classify(request.message)
     refusal = await resolve_scope(request.session_id, classification)
     if refusal is not None:
+        await record_refusal(request.session_id, request.message, refusal)
         return ChatResponse(
             session_id=request.session_id,
             response=refusal,
@@ -165,8 +177,13 @@ async def chat(request: ChatRequest) -> ChatResponse:
         )
     deps = await build_chat_deps(request.session_id, classification.primary.value)
     result = await get_chat_agent().run(
-        request.message, deps=deps, event_stream_handler=log_tool_events
+        request.message,
+        deps=deps,
+        message_history=await load_history(request.session_id),
+        event_stream_handler=log_tool_events,
+        usage_limits=CHAT_USAGE_LIMITS,
     )
+    await append_turn(request.session_id, result.new_messages())
     return ChatResponse(
         session_id=request.session_id,
         response=result.output,
@@ -178,14 +195,20 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[str]:
     classification = await classify(request.message)
     refusal = await resolve_scope(request.session_id, classification)
     if refusal is not None:
+        await record_refusal(request.session_id, request.message, refusal)
         yield refusal
         return
     deps = await build_chat_deps(request.session_id, classification.primary.value)
     async with get_chat_agent().run_stream(
-        request.message, deps=deps, event_stream_handler=log_tool_events
+        request.message,
+        deps=deps,
+        message_history=await load_history(request.session_id),
+        event_stream_handler=log_tool_events,
+        usage_limits=CHAT_USAGE_LIMITS,
     ) as result:
         async for chunk in result.stream_text(delta=True):
             yield chunk
+        await append_turn(request.session_id, result.new_messages())
 
 
 async def ingest_knowledge(request: KnowledgeIngestRequest) -> KnowledgeIngestResponse:
@@ -374,4 +397,5 @@ async def clear_knowledge(session_id: str) -> int:
     captions_removed = await clear_captions(session_id)
     if captions_removed:
         logger.info("cleared %d cached caption(s) for %s", captions_removed, session_id)
+    await clear_history(session_id)
     return await get_vector_store().clear(session_id)
