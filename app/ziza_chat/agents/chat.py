@@ -1,13 +1,15 @@
 from functools import lru_cache
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, DeferredToolRequests, RunContext
 from pydantic_ai.capabilities import ProcessHistory
 from pydantic_ai.models.anthropic import AnthropicModelSettings
+from pydantic_ai.output import OutputSpec
 
 from app.ziza_chat.config import ziza_settings
 from app.ziza_chat.deps import ChatDeps
 from app.ziza_chat.history_store.trimming import trim_to_recent_turns
 from app.ziza_chat.tools.common import current_datetime, search_knowledge_base
+from app.ziza_chat.tools.knowledge import clear_knowledge_base
 
 SYSTEM_PROMPT = """\
 You are Ziza, the assistant for Innovationist Tech.
@@ -70,14 +72,20 @@ what it does instead — decline once and move on rather than lecturing.
 Answer clearly and concisely, at the length the question needs."""
 
 
+ChatOutput = str | DeferredToolRequests
+
+CHAT_OUTPUT_SPEC: OutputSpec[ChatOutput] = [str, DeferredToolRequests]
+
+
 @lru_cache
-def get_chat_agent() -> Agent[ChatDeps, str]:
-    agent = Agent[ChatDeps, str](
+def get_chat_agent() -> Agent[ChatDeps, ChatOutput]:
+    # noinspection PyTypeChecker
+    agent = Agent[ChatDeps, ChatOutput](
         ziza_settings.ziza_chat_model,
         deps_type=ChatDeps,
-        output_type=str,
+        output_type=CHAT_OUTPUT_SPEC,
         instructions=SYSTEM_PROMPT,
-        tools=[search_knowledge_base, current_datetime],
+        tools=[search_knowledge_base, current_datetime, clear_knowledge_base],
         capabilities=[ProcessHistory(trim_to_recent_turns)],
         model_settings=AnthropicModelSettings(
             anthropic_cache_instructions=True,

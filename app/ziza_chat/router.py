@@ -9,7 +9,10 @@ from app.core.db.db_config import is_db_configured
 from app.ziza_chat import service
 from app.ziza_chat.document_loaders import UnsupportedDocumentError
 from app.ziza_chat.document_loaders.web import UnsafeUrlError
+from app.ziza_chat.hitl.service import NoPendingApprovalError
+from app.ziza_chat.knowledge_base import clear_knowledge
 from app.ziza_chat.schemas import (
+    ApprovalDecisionRequest,
     ChatRequest,
     ChatResponse,
     KnowledgeClearResponse,
@@ -40,14 +43,23 @@ async def chat_endpoint(body: ChatRequest) -> ChatResponse:
 @router.post("/chat/stream")
 async def chat_stream_endpoint(body: ChatRequest) -> StreamingResponse:
     async def event_generator() -> AsyncIterator[str]:
-        async for chunk in service.stream_chat(body):
-            yield format_sse(chunk)
+        async for event in service.stream_chat(body):
+            yield format_sse(event)
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/chat/approval", response_model=ChatResponse)
+async def chat_approval_endpoint(body: ApprovalDecisionRequest) -> ChatResponse:
+    require_db()
+    try:
+        return await service.resolve_approval(body)
+    except NoPendingApprovalError as missing:
+        raise HTTPException(status_code=409, detail=str(missing)) from missing
 
 
 @router.post(
@@ -109,7 +121,7 @@ async def ingest_url_endpoint(body: KnowledgeUrlRequest) -> KnowledgeIngestRespo
 @router.delete("/knowledge/{session_id}", response_model=KnowledgeClearResponse)
 async def clear_knowledge_endpoint(session_id: str) -> KnowledgeClearResponse:
     require_db()
-    chunks_deleted = await service.clear_knowledge(session_id)
+    chunks_deleted = await clear_knowledge(session_id)
     return KnowledgeClearResponse(
         session_id=session_id, chunks_deleted=chunks_deleted
     )

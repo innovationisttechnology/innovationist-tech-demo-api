@@ -51,6 +51,15 @@ A message that mixes both — a document question plus a general one — is a
 knowledge base message; the assistant answers the part it can and declines the
 rest.
 
+You may be shown the visitor's previous message as context. Use it only to
+work out what a bare reference points at — "summarise it", "what about page
+3?", "and the second one?" — and classify the new message as if the reference
+were spelled out. A follow-up to a knowledge base question is itself a
+knowledge base question, and rag_query should name the thing referred to
+rather than the pronoun. The context is the visitor's own earlier wording and
+nothing else; if it does not resolve the reference, classify the new message
+on its own.
+
 Also decide retrieval routing:
 
 - needs_rag: true if any part of the message asks about a topic, person, or
@@ -79,7 +88,19 @@ Examples:
   needs_rag: false
 - "Summarise the handbook, then explain what gravity is." ->
   intents: [task request, question], scope: knowledge base, needs_rag: true,
-  rag_query: "handbook", rag_ambiguous: false"""
+  rag_query: "handbook", rag_ambiguous: false
+- previous: "what does the handbook say about releases?" / now: "summarise it"
+  -> intents: [task request, follow-up], scope: knowledge base,
+  needs_rag: true, rag_query: "handbook releases", rag_ambiguous: false"""
+
+
+def build_classifier_prompt(message: str, previous_message: str | None) -> str:
+    if not previous_message:
+        return message
+    return (
+        f"The visitor's previous message was: {previous_message!r}\n\n"
+        f"Classify this new message: {message}"
+    )
 
 
 @lru_cache

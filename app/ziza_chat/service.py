@@ -1,20 +1,29 @@
 import asyncio
 import logging
 from pathlib import PurePosixPath
-from typing import AsyncIterator
+from typing import AsyncIterator, Sequence
 from urllib.parse import urlparse
 
+from pydantic_ai import (
+    DeferredToolRequests,
+    DeferredToolResults,
+    ToolApproved,
+    ToolDenied,
+)
+from pydantic_ai.messages import ModelMessage
 from pydantic_ai.usage import UsageLimits
 
 from app.core.db.db_config import is_db_configured
 from app.ziza_chat.agents.chat import get_chat_agent
-from app.ziza_chat.agents.classifier import get_classifier_agent
+from app.ziza_chat.agents.classifier import (
+    build_classifier_prompt,
+    get_classifier_agent,
+)
 from app.ziza_chat.agents.outputs import ClassifyResult, Scope
 from app.ziza_chat.agents.page_summary import summarize_page
 from app.ziza_chat.agents.vision import describe_image
 from app.ziza_chat.caption_cache import (
     carries_no_information,
-    clear_captions,
     get_cached_caption,
     hash_image,
     store_caption,
@@ -27,17 +36,27 @@ from app.ziza_chat.document_loaders import (
     load_document,
 )
 from app.ziza_chat.document_loaders.web import fetch_page, html_to_text
+from app.ziza_chat.history_store.repair import last_visitor_message
 from app.ziza_chat.history_store.service import (
     append_turn,
-    clear_history,
     load_history,
     record_refusal,
 )
+from app.ziza_chat.history_store.store import deserialize_turns
+from app.ziza_chat.hitl.models import PendingApproval
+from app.ziza_chat.hitl.service import (
+    claim_pending,
+    decline_abandoned,
+    record_pending,
+)
 from app.ziza_chat.schemas import (
+    ApprovalDecisionRequest,
     ChatRequest,
     ChatResponse,
+    ChatStreamEvent,
     KnowledgeIngestRequest,
     KnowledgeIngestResponse,
+    PendingApprovalRead,
 )
 from app.ziza_chat.tool_logging import log_tool_events
 from app.ziza_chat.vector_store.store import (
@@ -71,8 +90,12 @@ async def assert_capacity(session_id: str, document: str) -> None:
         )
 
 
-async def classify(message: str) -> ClassifyResult:
-    result = await get_classifier_agent().run(message)
+async def classify(
+    message: str, previous_message: str | None = None
+) -> ClassifyResult:
+    result = await get_classifier_agent().run(
+        build_classifier_prompt(message, previous_message)
+    )
     classification = result.output
     logger.info(
         'classified "%s" -> scope=%s intents=%s needs_rag=%s rag_query=%r ambiguous=%s',
@@ -165,50 +188,160 @@ async def build_chat_deps(session_id: str, intent: str) -> ChatDeps:
 CHAT_USAGE_LIMITS = UsageLimits(request_limit=5, tool_calls_limit=6)
 
 
+APPROVAL_FALLBACK_PROMPT = (
+    "That needs your confirmation before I can do it."
+)
+
+APPROVAL_UNAVAILABLE = (
+    "That action needs confirmation, which isn't available in this session."
+)
+
+
+def describe_pending(pending: PendingApproval) -> str:
+    summary = pending.details.get("summary")
+    prompt = str(summary) if summary else APPROVAL_FALLBACK_PROMPT
+    return f"{prompt} Confirm to continue, or say no to leave things as they are."
+
+
+def to_pending_read(pending: PendingApproval) -> PendingApprovalRead:
+    return PendingApprovalRead(
+        tool_call_id=pending.tool_call_id,
+        tool_name=pending.tool_name,
+        details=pending.details,
+    )
+
+
+async def build_response(
+    session_id: str,
+    intent: str,
+    output: str | DeferredToolRequests,
+    paused_messages: Sequence[ModelMessage] = (),
+) -> ChatResponse:
+    """Turn a finished run into a reply, or park a paused one.
+
+    A paused run's messages hold a tool call with no result, which Anthropic
+    rejects on replay. They go on the pending record instead of the transcript,
+    so the stored history stays valid for any other continuation.
+    """
+    if not isinstance(output, DeferredToolRequests):
+        return ChatResponse(
+            session_id=session_id, response=output, intent=intent
+        )
+    pending = await record_pending(session_id, output, intent, paused_messages)
+    if pending is None:
+        return ChatResponse(
+            session_id=session_id, response=APPROVAL_UNAVAILABLE, intent=intent
+        )
+    return ChatResponse(
+        session_id=session_id,
+        response=describe_pending(pending),
+        intent=intent,
+        pending_approval=to_pending_read(pending),
+    )
+
+
 async def chat(request: ChatRequest) -> ChatResponse:
-    classification = await classify(request.message)
+    await decline_abandoned(request.session_id)
+    history = await load_history(request.session_id)
+    classification = await classify(
+        request.message, last_visitor_message(history)
+    )
+    intent = classification.primary.value
     refusal = await resolve_scope(request.session_id, classification)
     if refusal is not None:
         await record_refusal(request.session_id, request.message, refusal)
         return ChatResponse(
-            session_id=request.session_id,
-            response=refusal,
-            intent=classification.primary.value,
+            session_id=request.session_id, response=refusal, intent=intent
         )
-    deps = await build_chat_deps(request.session_id, classification.primary.value)
+    deps = await build_chat_deps(request.session_id, intent)
     result = await get_chat_agent().run(
         request.message,
         deps=deps,
-        message_history=await load_history(request.session_id),
+        message_history=history,
         event_stream_handler=log_tool_events,
         usage_limits=CHAT_USAGE_LIMITS,
     )
+    if isinstance(result.output, DeferredToolRequests):
+        return await build_response(
+            request.session_id, intent, result.output, result.new_messages()
+        )
     await append_turn(request.session_id, result.new_messages())
-    return ChatResponse(
-        session_id=request.session_id,
-        response=result.output,
-        intent=classification.primary.value,
+    return await build_response(request.session_id, intent, result.output)
+
+
+async def resolve_approval(request: ApprovalDecisionRequest) -> ChatResponse:
+    pending = await claim_pending(request.session_id, request.tool_call_id)
+    decision: ToolApproved | ToolDenied = (
+        ToolApproved()
+        if request.approved
+        else ToolDenied("The visitor declined this action, so nothing was changed.")
     )
+    results = DeferredToolResults()
+    results.approvals[request.tool_call_id] = decision
+    paused_messages = deserialize_turns([pending.messages])
+    deps = await build_chat_deps(request.session_id, pending.intent)
+    result = await get_chat_agent().run(
+        deps=deps,
+        message_history=await load_history(request.session_id) + paused_messages,
+        deferred_tool_results=results,
+        event_stream_handler=log_tool_events,
+        usage_limits=CHAT_USAGE_LIMITS,
+    )
+    resolved_turn = paused_messages + list(result.new_messages())
+    if isinstance(result.output, DeferredToolRequests):
+        return await build_response(
+            request.session_id, pending.intent, result.output, resolved_turn
+        )
+    await append_turn(request.session_id, resolved_turn)
+    return await build_response(request.session_id, pending.intent, result.output)
 
 
-async def stream_chat(request: ChatRequest) -> AsyncIterator[str]:
-    classification = await classify(request.message)
+async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatStreamEvent]:
+    await decline_abandoned(request.session_id)
+    history = await load_history(request.session_id)
+    classification = await classify(
+        request.message, last_visitor_message(history)
+    )
+    intent = classification.primary.value
     refusal = await resolve_scope(request.session_id, classification)
     if refusal is not None:
         await record_refusal(request.session_id, request.message, refusal)
-        yield refusal
+        yield ChatStreamEvent(type="chat.chunk", chunk=refusal)
         return
-    deps = await build_chat_deps(request.session_id, classification.primary.value)
+    deps = await build_chat_deps(request.session_id, intent)
     async with get_chat_agent().run_stream(
         request.message,
         deps=deps,
-        message_history=await load_history(request.session_id),
+        message_history=history,
         event_stream_handler=log_tool_events,
         usage_limits=CHAT_USAGE_LIMITS,
     ) as result:
-        async for chunk in result.stream_text(delta=True):
-            yield chunk
-        await append_turn(request.session_id, result.new_messages())
+        deferred: DeferredToolRequests | None = None
+        streamed = ""
+        async for output in result.stream_output():
+            if isinstance(output, DeferredToolRequests):
+                deferred = output
+                continue
+            if output.startswith(streamed) and len(output) > len(streamed):
+                yield ChatStreamEvent(
+                    type="chat.chunk", chunk=output[len(streamed) :]
+                )
+                streamed = output
+        paused_messages = list(result.new_messages()) if deferred else []
+        if deferred is None:
+            await append_turn(request.session_id, result.new_messages())
+    if deferred is None:
+        return
+    pending = await record_pending(
+        request.session_id, deferred, intent, paused_messages
+    )
+    if pending is None:
+        yield ChatStreamEvent(type="chat.chunk", chunk=APPROVAL_UNAVAILABLE)
+        return
+    yield ChatStreamEvent(type="chat.chunk", chunk=describe_pending(pending))
+    yield ChatStreamEvent(
+        type="chat.approval_required", pending_approval=to_pending_read(pending)
+    )
 
 
 async def ingest_knowledge(request: KnowledgeIngestRequest) -> KnowledgeIngestResponse:
@@ -391,11 +524,4 @@ async def ingest_url(session_id: str, url: str) -> KnowledgeIngestResponse:
     )
 
 
-async def clear_knowledge(session_id: str) -> int:
-    # Captions are derived from the visitor's images, so clearing the knowledge
-    # base has to take them too or their content survives the delete.
-    captions_removed = await clear_captions(session_id)
-    if captions_removed:
-        logger.info("cleared %d cached caption(s) for %s", captions_removed, session_id)
-    await clear_history(session_id)
-    return await get_vector_store().clear(session_id)
+

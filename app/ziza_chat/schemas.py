@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -6,10 +8,29 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
 
 
+class PendingApprovalRead(BaseModel):
+    tool_call_id: str
+    tool_name: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
 class ChatResponse(BaseModel):
     session_id: str
     response: str
     intent: str
+    pending_approval: PendingApprovalRead | None = None
+
+
+class ChatStreamEvent(BaseModel):
+    type: str
+    chunk: str | None = None
+    pending_approval: PendingApprovalRead | None = None
+
+
+class ApprovalDecisionRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1)
+    approved: bool
 
 
 class KnowledgeIngestRequest(BaseModel):

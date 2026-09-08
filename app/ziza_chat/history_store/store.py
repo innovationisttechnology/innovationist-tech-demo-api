@@ -9,10 +9,13 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 
 from app.ziza_chat.history_store.models import ConversationSummary, ConversationTurn
+from app.ziza_chat.history_store.repair import drop_unresolved_tool_calls
 from app.ziza_chat.history_store.summary import build_summary_turn
 from app.ziza_chat.history_store.trimming import turns_to_drop
 
@@ -41,6 +44,35 @@ def build_refusal_turn(visitor_message: str, refusal: str) -> list[ModelMessage]
     return [
         ModelRequest(parts=[UserPromptPart(content=visitor_message)]),
         ModelResponse(parts=[TextPart(content=refusal)]),
+    ]
+
+
+def build_declined_turn(
+    paused_messages: Sequence[ModelMessage], decline: str
+) -> list[ModelMessage]:
+    """Close out a paused turn the visitor walked away from.
+
+    The paused messages hold a tool call with no result. Answering it here
+    keeps the pair complete, so the transcript stays replayable and still
+    records that the action was offered and not taken.
+    """
+    answers = [
+        ToolReturnPart(
+            tool_name=part.tool_name,
+            content=decline,
+            tool_call_id=part.tool_call_id,
+        )
+        for message in paused_messages
+        if isinstance(message, ModelResponse)
+        for part in message.parts
+        if isinstance(part, ToolCallPart)
+    ]
+    if not answers:
+        return []
+    return [
+        *paused_messages,
+        ModelRequest(parts=list(answers)),
+        ModelResponse(parts=[TextPart(content=decline)]),
     ]
 
 
@@ -79,7 +111,9 @@ class MongoHistoryStore:
             .skip(skip)
             .to_list()
         )
-        return deserialize_turns([turn.messages for turn in turns])
+        return drop_unresolved_tool_calls(
+            deserialize_turns([turn.messages for turn in turns])
+        )
 
     @staticmethod
     async def load_turn_range(
