@@ -1,46 +1,41 @@
 from functools import lru_cache
-from typing import Any
+from typing import Any, Sequence
 
-from app.ziza_chat.hitl.models import PendingApproval
+from app.ziza_chat.hitl.models import DeferredCall, PausedRun
 
 
-class MongoApprovalStore:
+class MongoPausedRunStore:
     @staticmethod
     async def replace(
         session_id: str,
-        tool_call_id: str,
-        tool_name: str,
         intent: str,
-        details: dict[str, Any],
+        calls: Sequence[DeferredCall],
         messages: list[dict[str, Any]],
-    ) -> PendingApproval:
-        await PendingApproval.find(
-            PendingApproval.session_id == session_id
-        ).delete()
-        pending = PendingApproval(
+    ) -> PausedRun:
+        await PausedRun.find(PausedRun.session_id == session_id).delete()
+        paused = PausedRun(
             session_id=session_id,
-            tool_call_id=tool_call_id,
-            tool_name=tool_name,
             intent=intent,
-            details=details,
+            calls=list(calls),
             messages=messages,
         )
-        await pending.insert()
-        return pending
+        await paused.insert()
+        return paused
 
     @staticmethod
-    async def find(session_id: str) -> PendingApproval | None:
-        return await PendingApproval.find_one(
-            PendingApproval.session_id == session_id
-        )
+    async def find(session_id: str) -> PausedRun | None:
+        return await PausedRun.find_one(PausedRun.session_id == session_id)
+
+    @staticmethod
+    async def save(paused: PausedRun) -> PausedRun:
+        await paused.save()
+        return paused
 
     @staticmethod
     async def discard(session_id: str) -> None:
-        await PendingApproval.find(
-            PendingApproval.session_id == session_id
-        ).delete()
+        await PausedRun.find(PausedRun.session_id == session_id).delete()
 
 
 @lru_cache
-def get_approval_store() -> MongoApprovalStore:
-    return MongoApprovalStore()
+def get_paused_run_store() -> MongoPausedRunStore:
+    return MongoPausedRunStore()

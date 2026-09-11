@@ -14,21 +14,32 @@ from fastapi.testclient import TestClient
 from app.core.db import dependencies as db_dependencies
 from app.main import app
 from app.ziza_chat import service
-from app.ziza_chat.hitl.service import NoPendingApprovalError
-from app.ziza_chat.schemas import ChatResponse, PendingApprovalRead
+from app.ziza_chat.hitl.models import DeferredKind
+from app.ziza_chat.hitl.service import UnknownDeferredCallError
+from app.ziza_chat.schemas import ChatResponse, PendingCallRead
 
+# (method, request path, OpenAPI path template, request kwargs). The template
+# is what the coverage check below compares against, so a new route cannot be
+# added without a request that proves it is gated.
 DB_GATED_REQUESTS = [
-    ("post", "/api/ziza/chat", {"json": {"session_id": "s", "message": "hi"}}),
-    ("post", "/api/ziza/chat/stream", {"json": {"session_id": "s", "message": "hi"}}),
-    ("post", "/api/ziza/chat/approval",
+    ("post", "/api/ziza/chat", "/api/ziza/chat",
+     {"json": {"session_id": "s", "message": "hi"}}),
+    ("post", "/api/ziza/chat/stream", "/api/ziza/chat/stream",
+     {"json": {"session_id": "s", "message": "hi"}}),
+    ("post", "/api/ziza/chat/approval", "/api/ziza/chat/approval",
      {"json": {"session_id": "s", "tool_call_id": "c", "approved": True}}),
-    ("post", "/api/ziza/knowledge",
+    ("post", "/api/ziza/chat/links", "/api/ziza/chat/links",
+     {"json": {"session_id": "s", "tool_call_id": "c", "selected_links": []}}),
+    ("post", "/api/ziza/knowledge", "/api/ziza/knowledge",
      {"json": {"session_id": "s", "source": "notes", "text": "hello"}}),
-    ("post", "/api/ziza/knowledge/url",
+    ("post", "/api/ziza/knowledge/url", "/api/ziza/knowledge/url",
      {"json": {"session_id": "s", "url": "https://example.com"}}),
-    ("post", "/api/ziza/knowledge/file",
+    ("post", "/api/ziza/knowledge/url/links", "/api/ziza/knowledge/url/links",
+     {"json": {"session_id": "s", "url": "https://example.com",
+               "selected_links": ["https://example.com/a"]}}),
+    ("post", "/api/ziza/knowledge/file", "/api/ziza/knowledge/file",
      {"data": {"session_id": "s"}, "files": {"file": ("a.txt", b"hi", "text/plain")}}),
-    ("delete", "/api/ziza/knowledge/s", {}),
+    ("delete", "/api/ziza/knowledge/s", "/api/ziza/knowledge/{session_id}", {}),
 ]
 
 
@@ -43,25 +54,32 @@ def allow_db(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestDatabaseGate:
-    @pytest.mark.parametrize("method,path,payload", DB_GATED_REQUESTS)
+    @pytest.mark.parametrize("method,path,template,payload", DB_GATED_REQUESTS)
     def test_a_gated_route_answers_503_without_a_database(
-        self, client: TestClient, method: str, path: str, payload: dict[str, Any]
+        self,
+        client: TestClient,
+        method: str,
+        path: str,
+        template: str,
+        payload: dict[str, Any],
     ) -> None:
         response = getattr(client, method)(path, **payload)
         assert response.status_code == 503
 
     def test_every_route_is_gated(self) -> None:
-        gated = {path for _, path, _ in DB_GATED_REQUESTS}
+        # Read from the OpenAPI schema, not app.routes: included routers are
+        # nested behind a single opaque route object, so walking app.routes
+        # finds no ziza paths at all and the check silently passes.
+        covered = {template for _, _, template, _ in DB_GATED_REQUESTS}
         declared = {
-            path
-            for route in app.routes
-            if (path := str(getattr(route, "path", ""))).startswith("/api/ziza")
+            path for path in app.openapi()["paths"] if path.startswith("/api/ziza")
         }
-        assert declared - gated == set(), f"ungated ziza routes: {declared - gated}"
+        assert declared, "no ziza routes found — the check would be vacuous"
+        assert declared - covered == set(), f"ungated ziza routes: {declared - covered}"
 
 
 class TestChatResponseShape:
-    def test_a_plain_answer_omits_the_pending_approval(
+    def test_a_plain_answer_has_nothing_pending(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         allow_db(monkeypatch)
@@ -75,7 +93,7 @@ class TestChatResponseShape:
         body = client.post(
             "/api/ziza/chat", json={"session_id": "s", "message": "hi"}
         ).json()
-        assert body["pending_approval"] is None
+        assert body["pending_calls"] == []
 
     def test_a_paused_run_returns_the_call_id_to_confirm(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -87,20 +105,25 @@ class TestChatResponseShape:
                 session_id=request.session_id,
                 response="Confirm to continue.",
                 intent="task request",
-                pending_approval=PendingApprovalRead(
-                    tool_call_id="call_1",
-                    tool_name="clear_knowledge_base",
-                    details={"summary": "Delete 2 document(s)."},
-                ),
+                pending_calls=[
+                    PendingCallRead(
+                        tool_call_id="call_1",
+                        tool_name="clear_knowledge_base",
+                        kind=DeferredKind.APPROVAL,
+                        details={"summary": "Delete 2 document(s)."},
+                    )
+                ],
             )
 
         monkeypatch.setattr(service, "chat", fake_chat)
         body = client.post(
             "/api/ziza/chat", json={"session_id": "s", "message": "clear it"}
         ).json()
-        assert body["pending_approval"]["tool_call_id"] == "call_1"
-        assert body["pending_approval"]["tool_name"] == "clear_knowledge_base"
-        assert body["pending_approval"]["details"]["summary"] == "Delete 2 document(s)."
+        pending = body["pending_calls"][0]
+        assert pending["tool_call_id"] == "call_1"
+        assert pending["tool_name"] == "clear_knowledge_base"
+        assert pending["kind"] == "approval"
+        assert pending["details"]["summary"] == "Delete 2 document(s)."
 
 
 class TestApprovalEndpoint:
@@ -130,7 +153,7 @@ class TestApprovalEndpoint:
         allow_db(monkeypatch)
 
         async def fake_resolve(request: Any) -> ChatResponse:
-            raise NoPendingApprovalError("No approval is pending.")
+            raise UnknownDeferredCallError("No approval is pending.")
 
         monkeypatch.setattr(service, "resolve_approval", fake_resolve)
         response = client.post(
@@ -190,8 +213,10 @@ class TestStreamFrames:
             yield ChatStreamEvent(type="chat.chunk", chunk="Confirm to continue.")
             yield ChatStreamEvent(
                 type="chat.approval_required",
-                pending_approval=PendingApprovalRead(
-                    tool_call_id="call_1", tool_name="clear_knowledge_base"
+                pending_call=PendingCallRead(
+                    tool_call_id="call_1",
+                    tool_name="clear_knowledge_base",
+                    kind=DeferredKind.APPROVAL,
                 ),
             )
 
@@ -201,3 +226,146 @@ class TestStreamFrames:
         )
         assert "event: chat.approval_required" in response.text
         assert '"tool_call_id": "call_1"' in response.text
+
+
+class TestLinkSelectionEndpoint:
+    def test_a_selection_returns_the_resumed_answer(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        allow_db(monkeypatch)
+
+        async def fake_resolve(request: Any) -> ChatResponse:
+            assert request.selected_links == ["https://example.com/a"]
+            return ChatResponse(
+                session_id=request.session_id,
+                response="Indexed 2 pages.",
+                intent="task request",
+            )
+
+        monkeypatch.setattr(service, "resolve_link_selection", fake_resolve)
+        response = client.post(
+            "/api/ziza/chat/links",
+            json={
+                "session_id": "s",
+                "tool_call_id": "call_1",
+                "selected_links": ["https://example.com/a"],
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["response"] == "Indexed 2 pages."
+
+    def test_an_empty_selection_is_valid(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Picking no links means "just the page" — not a malformed request."""
+        allow_db(monkeypatch)
+
+        async def fake_resolve(request: Any) -> ChatResponse:
+            assert request.selected_links == []
+            return ChatResponse(
+                session_id=request.session_id, response="Indexed.", intent="task request"
+            )
+
+        monkeypatch.setattr(service, "resolve_link_selection", fake_resolve)
+        response = client.post(
+            "/api/ziza/chat/links",
+            json={"session_id": "s", "tool_call_id": "call_1"},
+        )
+        assert response.status_code == 200
+
+    def test_a_link_that_was_never_offered_is_rejected(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        allow_db(monkeypatch)
+
+        async def fake_resolve(request: Any) -> ChatResponse:
+            raise service.UnofferedLinkError("Not offered for this call: evil.com.")
+
+        monkeypatch.setattr(service, "resolve_link_selection", fake_resolve)
+        response = client.post(
+            "/api/ziza/chat/links",
+            json={
+                "session_id": "s",
+                "tool_call_id": "call_1",
+                "selected_links": ["https://evil.com"],
+            },
+        )
+        assert response.status_code == 422
+        assert "Not offered" in response.text
+
+    def test_nothing_pending_is_a_conflict(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        allow_db(monkeypatch)
+
+        async def fake_resolve(request: Any) -> ChatResponse:
+            raise UnknownDeferredCallError("call_1 is not awaiting a response.")
+
+        monkeypatch.setattr(service, "resolve_link_selection", fake_resolve)
+        response = client.post(
+            "/api/ziza/chat/links",
+            json={"session_id": "s", "tool_call_id": "call_1"},
+        )
+        assert response.status_code == 409
+
+
+class TestUrlLinkEndpoint:
+    def test_a_selection_is_indexed(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.ziza_chat.schemas import UrlLinkSelectionResponse
+
+        allow_db(monkeypatch)
+
+        async def fake_ingest(request: Any) -> UrlLinkSelectionResponse:
+            assert request.url == "https://example.com/guide"
+            return UrlLinkSelectionResponse(
+                session_id=request.session_id, documents_used=3, documents_allowed=10
+            )
+
+        monkeypatch.setattr(service, "ingest_offered_links", fake_ingest)
+        response = client.post(
+            "/api/ziza/knowledge/url/links",
+            json={
+                "session_id": "s",
+                "url": "https://example.com/guide",
+                "selected_links": ["https://example.com/guide/setup"],
+            },
+        )
+        assert response.status_code == 201
+        assert response.json()["documents_used"] == 3
+
+    def test_an_empty_selection_is_rejected(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unlike the chat flow, there is no page left to index on its own."""
+        allow_db(monkeypatch)
+        response = client.post(
+            "/api/ziza/knowledge/url/links",
+            json={
+                "session_id": "s",
+                "url": "https://example.com/guide",
+                "selected_links": [],
+            },
+        )
+        assert response.status_code == 422
+
+    def test_an_offsite_link_is_rejected(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        allow_db(monkeypatch)
+
+        async def fake_ingest(request: Any) -> Any:
+            raise service.UnofferedLinkError("Not part of example.com: evil.net.")
+
+        monkeypatch.setattr(service, "ingest_offered_links", fake_ingest)
+        response = client.post(
+            "/api/ziza/knowledge/url/links",
+            json={
+                "session_id": "s",
+                "url": "https://example.com/guide",
+                "selected_links": ["https://evil.net/x"],
+            },
+        )
+        assert response.status_code == 422
+        assert "Not part of" in response.text

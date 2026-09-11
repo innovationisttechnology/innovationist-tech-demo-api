@@ -29,9 +29,11 @@ from app.ziza_chat.history_store import (
 )
 from app.ziza_chat.history_store import service as history_service
 from app.ziza_chat.history_store.repair import (
+    drop_orphan_tool_returns,
     drop_unresolved_tool_calls,
     last_visitor_message,
 )
+from app.ziza_chat.history_store.store import build_declined_turn
 from app.ziza_chat.history_store.summary import (
     SUMMARY_HEADER,
     build_summary_turn,
@@ -111,6 +113,10 @@ class StubVectorStore:
         return []
 
 
+async def no_page_links(session_id: str) -> list[Any]:
+    return []
+
+
 def install_history_store(
     monkeypatch: pytest.MonkeyPatch,
     history: list[ModelMessage] | None = None,
@@ -121,6 +127,7 @@ def install_history_store(
     monkeypatch.setattr(history_service, "is_db_configured", lambda: True)
     monkeypatch.setattr(service, "get_vector_store", lambda: StubVectorStore())
     monkeypatch.setattr(service, "is_db_configured", lambda: True)
+    monkeypatch.setattr(service, "load_page_links", no_page_links)
     return store
 
 
@@ -128,7 +135,9 @@ def install_classification(
     monkeypatch: pytest.MonkeyPatch, scope: Scope = Scope.ASSISTANT
 ) -> None:
     async def fake_classify(
-        message: str, previous_message: str | None = None
+        message: str,
+        previous_message: str | None = None,
+        session_id: str = "-",
     ) -> ClassifyResult:
         return ClassifyResult(
             scope=scope, intents=[Intent.QUESTION], needs_rag=False, rag_query=None
@@ -357,7 +366,11 @@ class TestClearingTakesTheTranscript:
             async def clear(self, session_id: str) -> int:
                 return 3
 
+        async def no_links(session_id: str) -> int:
+            return 0
+
         monkeypatch.setattr(knowledge_base, "clear_captions", no_captions)
+        monkeypatch.setattr(knowledge_base, "clear_page_links", no_links)
         monkeypatch.setattr(
             knowledge_base, "get_vector_store", lambda: ClearableVectorStore()
         )
@@ -680,3 +693,209 @@ class TestClassifierPrompt:
         prompt = build_classifier_prompt("summarise it", "what does the handbook say?")
         assert "what does the handbook say?" in prompt
         assert "summarise it" in prompt
+
+
+def searched_then_deferred_turn() -> list[ModelMessage]:
+    """A turn that ran one tool to completion before pausing on a second."""
+    return [
+        ModelRequest(parts=[UserPromptPart(content="what links are on this site")]),
+        ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name="search_knowledge_base",
+                    args={"query": "links"},
+                    tool_call_id="toolu_search",
+                )
+            ]
+        ),
+        ModelRequest(
+            parts=[
+                ToolReturnPart(
+                    tool_name="search_knowledge_base",
+                    content="No passages matched.",
+                    tool_call_id="toolu_search",
+                )
+            ]
+        ),
+        ModelResponse(
+            parts=[
+                ToolCallPart(
+                    tool_name="add_url_to_knowledge_base",
+                    args={"url": "https://example.com/"},
+                    tool_call_id="toolu_add_url",
+                )
+            ]
+        ),
+    ]
+
+
+def tool_return_ids(messages: list[ModelMessage]) -> list[str]:
+    return [
+        part.tool_call_id
+        for message in messages
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if isinstance(part, ToolReturnPart)
+    ]
+
+
+class TestDecliningAPartlyRunTurn:
+    def test_only_the_unanswered_call_is_answered(self) -> None:
+        """Answering a resolved call again is a 400: its tool_use is no longer
+        the preceding message."""
+        declined = build_declined_turn(searched_then_deferred_turn(), "not carried out")
+        assert tool_return_ids(declined) == ["toolu_search", "toolu_add_url"]
+        closing = declined[len(searched_then_deferred_turn()) :]
+        assert tool_return_ids(closing) == ["toolu_add_url"]
+
+    def test_every_call_still_ends_up_answered_exactly_once(self) -> None:
+        declined = build_declined_turn(searched_then_deferred_turn(), "not carried out")
+        answered = tool_return_ids(declined)
+        called = [
+            part.tool_call_id
+            for message in declined
+            if isinstance(message, ModelResponse)
+            for part in message.parts
+            if isinstance(part, ToolCallPart)
+        ]
+        assert sorted(answered) == sorted(called)
+        assert len(answered) == len(set(answered))
+
+
+class TestDroppingOrphanToolReturns:
+    def test_a_result_with_no_call_is_dropped(self) -> None:
+        poisoned = [
+            ModelRequest(parts=[UserPromptPart(content="hi")]),
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        tool_name="ghost", content="x", tool_call_id="never_called"
+                    )
+                ]
+            ),
+        ]
+        assert tool_return_ids(drop_orphan_tool_returns(poisoned)) == []
+
+    def test_a_duplicated_result_is_dropped(self) -> None:
+        """The shape build_declined_turn used to write, replayed from storage."""
+        stored = [
+            *searched_then_deferred_turn(),
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        tool_name="search_knowledge_base",
+                        content="not carried out",
+                        tool_call_id="toolu_search",
+                    ),
+                    ToolReturnPart(
+                        tool_name="add_url_to_knowledge_base",
+                        content="not carried out",
+                        tool_call_id="toolu_add_url",
+                    ),
+                ]
+            ),
+        ]
+        repaired = drop_orphan_tool_returns(stored)
+        assert tool_return_ids(repaired) == ["toolu_search", "toolu_add_url"]
+
+    def test_a_message_left_with_nothing_is_removed(self) -> None:
+        poisoned = [
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        tool_name="ghost", content="x", tool_call_id="never_called"
+                    )
+                ]
+            ),
+        ]
+        assert drop_orphan_tool_returns(poisoned) == []
+
+    def test_a_user_message_survives_alongside_a_dropped_result(self) -> None:
+        poisoned = [
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        tool_name="ghost", content="x", tool_call_id="never_called"
+                    ),
+                    UserPromptPart(content="still here"),
+                ]
+            ),
+        ]
+        repaired = drop_orphan_tool_returns(poisoned)
+        assert last_visitor_message(repaired) == "still here"
+
+    def test_a_healthy_transcript_is_untouched(self) -> None:
+        healthy = searched_then_deferred_turn()
+        assert drop_orphan_tool_returns(healthy) == healthy
+
+
+def anthropic_violations(messages: list[ModelMessage]) -> list[str]:
+    """Ids Anthropic would reject: a tool result whose call is not the message
+    directly before it."""
+    violations: list[str] = []
+    previous_call_ids: set[str] = set()
+    for message in messages:
+        if isinstance(message, ModelResponse):
+            previous_call_ids = {
+                part.tool_call_id
+                for part in message.parts
+                if isinstance(part, ToolCallPart)
+            }
+            continue
+        for part in message.parts:
+            if isinstance(part, ToolReturnPart) and (
+                part.tool_call_id not in previous_call_ids
+            ):
+                violations.append(part.tool_call_id)
+        previous_call_ids = set()
+    return violations
+
+
+class TestTheReplayInvariant:
+    def test_the_old_declined_turn_shape_would_have_been_rejected(self) -> None:
+        paused = searched_then_deferred_turn()
+        every_call_answered = [
+            *paused,
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        tool_name="search_knowledge_base",
+                        content="not carried out",
+                        tool_call_id="toolu_search",
+                    ),
+                    ToolReturnPart(
+                        tool_name="add_url_to_knowledge_base",
+                        content="not carried out",
+                        tool_call_id="toolu_add_url",
+                    ),
+                ]
+            ),
+        ]
+        assert anthropic_violations(every_call_answered) == ["toolu_search"]
+
+    def test_the_declined_turn_it_writes_now_is_accepted(self) -> None:
+        declined = build_declined_turn(searched_then_deferred_turn(), "not carried out")
+        assert anthropic_violations(declined) == []
+
+    def test_repairing_a_stored_poisoned_turn_makes_it_replayable(self) -> None:
+        poisoned = [
+            *searched_then_deferred_turn(),
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        tool_name="search_knowledge_base",
+                        content="not carried out",
+                        tool_call_id="toolu_search",
+                    ),
+                    ToolReturnPart(
+                        tool_name="add_url_to_knowledge_base",
+                        content="not carried out",
+                        tool_call_id="toolu_add_url",
+                    ),
+                ]
+            ),
+            ModelResponse(parts=[TextPart(content="not carried out")]),
+        ]
+        assert anthropic_violations(poisoned)
+        repaired = drop_unresolved_tool_calls(drop_orphan_tool_returns(poisoned))
+        assert anthropic_violations(repaired) == []

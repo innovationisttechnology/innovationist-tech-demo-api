@@ -40,7 +40,18 @@ access to the visitor's documents at all?
   whenever the answer would have to be read rather than recalled, even if
   nothing has been uploaded yet.
 - assistant: the message is about this assistant or demo itself, or is purely
-  social — greetings, thanks, small talk, "what can you do".
+  social — greetings, thanks, small talk, "what can you do". It also covers
+  asking the demo to *do* something with the session rather than answer from
+  it: add a link or file, clear what is stored, or list what is stored ("what
+  have I uploaded?", "which documents do you have?"). Those are operations, not
+  questions with an answer to be read.
+
+Naming the session's own material does not make a message an operation. Asking
+which documents exist is scope assistant; asking about what is inside one of
+them is scope knowledge base, however vaguely it refers to it. "Tell me about
+this website", "what is this file about", "summarise it" all have to be read
+from the visitor's material, so they are knowledge base messages — and
+needs_rag is true for them.
 
 A well-known topic does not become a knowledge base question by being phrased
 as one. "Tell me about gravity" is out of scope; "what does my document say
@@ -91,7 +102,20 @@ Examples:
   rag_query: "handbook", rag_ambiguous: false
 - previous: "what does the handbook say about releases?" / now: "summarise it"
   -> intents: [task request, follow-up], scope: knowledge base,
-  needs_rag: true, rag_query: "handbook releases", rag_ambiguous: false"""
+  needs_rag: true, rag_query: "handbook releases", rag_ambiguous: false
+- "Add https://example.com/docs/guide to my knowledge base" ->
+  intents: [task request], scope: assistant, needs_rag: false
+- "Read this and tell me about it: https://example.com/pricing" ->
+  intents: [task request], scope: assistant, needs_rag: false
+- "Delete everything I've uploaded" -> intents: [task request],
+  scope: assistant, needs_rag: false
+- "What documents do you have for me?" -> intents: [question],
+  scope: assistant, needs_rag: false
+- "Tell me about this website" -> intents: [task request],
+  scope: knowledge base, needs_rag: true, rag_query: "website",
+  rag_ambiguous: true
+- "What is this file about?" -> intents: [question], scope: knowledge base,
+  needs_rag: true, rag_query: "file", rag_ambiguous: true"""
 
 
 def build_classifier_prompt(message: str, previous_message: str | None) -> str:

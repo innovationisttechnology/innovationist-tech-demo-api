@@ -9,7 +9,8 @@ from app.core.config import settings
 from app.core.db.index_migrations import reconcile_indexes
 from app.ziza_chat.caption_cache import CachedCaption
 from app.ziza_chat.history_store.models import ConversationSummary, ConversationTurn
-from app.ziza_chat.hitl.models import PendingApproval
+from app.ziza_chat.hitl.models import PausedRun
+from app.ziza_chat.page_links import PageLinks
 from app.ziza_chat.vector_store.models import KnowledgeChunk
 
 _client: AsyncMongoClient[Any] | None = None
@@ -23,7 +24,8 @@ def get_document_models() -> List[Type[Document]]:
         CachedCaption,
         ConversationTurn,
         ConversationSummary,
-        PendingApproval,
+        PausedRun,
+        PageLinks,
     ]
 
 

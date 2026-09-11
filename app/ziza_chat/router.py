@@ -9,7 +9,7 @@ from app.core.db import RequiresDatabase
 from app.ziza_chat import service
 from app.ziza_chat.document_loaders import UnsupportedDocumentError
 from app.ziza_chat.document_loaders.web import UnsafeUrlError
-from app.ziza_chat.hitl.service import NoPendingApprovalError
+from app.ziza_chat.hitl.service import UnknownDeferredCallError
 from app.ziza_chat.knowledge_base import clear_knowledge
 from app.ziza_chat.schemas import (
     ApprovalDecisionRequest,
@@ -19,6 +19,9 @@ from app.ziza_chat.schemas import (
     KnowledgeIngestRequest,
     KnowledgeIngestResponse,
     KnowledgeUrlRequest,
+    LinkSelectionRequest,
+    UrlLinkSelectionRequest,
+    UrlLinkSelectionResponse,
 )
 from app.ziza_chat.utils import format_sse
 
@@ -51,8 +54,23 @@ async def chat_stream_endpoint(body: ChatRequest) -> StreamingResponse:
 async def chat_approval_endpoint(body: ApprovalDecisionRequest) -> ChatResponse:
     try:
         return await service.resolve_approval(body)
-    except NoPendingApprovalError as missing:
+    except UnknownDeferredCallError as missing:
         raise HTTPException(status_code=409, detail=str(missing)) from missing
+
+
+@router.post("/chat/links", response_model=ChatResponse)
+async def chat_link_selection_endpoint(body: LinkSelectionRequest) -> ChatResponse:
+    """The deferred call's external executor.
+
+    Does the indexing the paused tool only described, then resumes the run
+    with what landed.
+    """
+    try:
+        return await service.resolve_link_selection(body)
+    except UnknownDeferredCallError as missing:
+        raise HTTPException(status_code=409, detail=str(missing)) from missing
+    except service.UnofferedLinkError as unoffered:
+        raise HTTPException(status_code=422, detail=str(unoffered)) from unoffered
 
 
 @router.post("/knowledge", response_model=KnowledgeIngestResponse, status_code=201)
@@ -104,6 +122,25 @@ async def ingest_url_endpoint(body: KnowledgeUrlRequest) -> KnowledgeIngestRespo
         raise HTTPException(
             status_code=502, detail=f"Could not reach {body.url}."
         ) from network_failure
+
+
+@router.post(
+    "/knowledge/url/links",
+    response_model=UrlLinkSelectionResponse,
+    status_code=201,
+)
+async def ingest_url_links_endpoint(
+    body: UrlLinkSelectionRequest,
+) -> UrlLinkSelectionResponse:
+    """Index pages offered as `candidate_links` by a previous /knowledge/url call.
+
+    The page itself is already indexed by then; this is only the follow-up
+    question of how much of the rest of the site to take with it.
+    """
+    try:
+        return await service.ingest_offered_links(body)
+    except service.UnofferedLinkError as offsite:
+        raise HTTPException(status_code=422, detail=str(offsite)) from offsite
 
 
 @router.delete("/knowledge/{session_id}", response_model=KnowledgeClearResponse)

@@ -4,6 +4,13 @@ from app.ziza_chat.vector_store.store import MongoVectorStore
 
 
 @dataclass
+class SearchOutcome:
+    query: str
+    matches: int
+    best_score: float | None
+
+
+@dataclass
 class ChatDeps:
     """Per-request dependencies handed to the chat agent via RunContext.
 
@@ -19,3 +26,6 @@ class ChatDeps:
     documents: list[str] = field(default_factory=list)
     # None when MongoDB is not configured; the search tool degrades gracefully.
     vector_store: MongoVectorStore | None = None
+    # Written by search_knowledge_base and read after the run, so the caller
+    # knows how retrieval actually went without parsing the answer text.
+    searches: list[SearchOutcome] = field(default_factory=list)

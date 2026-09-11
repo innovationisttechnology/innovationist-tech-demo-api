@@ -640,6 +640,56 @@ base"* inside an uploaded document cannot execute silently, because the run stop
 and a human sees the action first. That extends the §12 boundary rather than
 duplicating it.
 
+### Deferred calls: when the result comes from outside
+
+Approval is one of two reasons a run ends holding an unanswered tool call. The
+other is that the tool's *result* is produced somewhere this run cannot reach —
+in the browser, by a worker, by a person supplying data rather than consent.
+Raise `CallDeferred` instead:
+
+```python
+raise CallDeferred(metadata={"url": url, "links": [...]})
+```
+
+The call lands in `DeferredToolRequests.calls` rather than `.approvals`, and is
+resumed by supplying the return value rather than a decision:
+
+```python
+results = requests.build_results(calls={tool_call_id: "Indexed 3 pages."})
+```
+
+> **The tool body does not run again.** This is the one difference that matters.
+> `ToolApproved` re-executes the tool with `tool_call_approved=True`; a deferred
+> call never re-enters the function — the value you supply *is* its return value
+> (`_tool_execution.py` only re-executes for `None` or `ToolApproved`). So the
+> work has to happen in whatever resumes the run. A tool that does the work
+> *before* raising `CallDeferred` will do it whether or not the human ever
+> answers.
+
+Which means the two kinds want opposite tool bodies. An approval-gated tool does
+the work in the body and raises early. A deferred tool only *describes* the work
+— `add_url_to_knowledge_base` fetches the page and lists its links, and the
+`/chat/links` endpoint does the indexing when the selection comes back. Nothing
+is written until then, so an abandoned offer is genuinely a no-op.
+
+> **One response can defer several calls.** `approvals[0]` is a trap: a model can
+> emit three deferred calls at once, and they come back separately and out of
+> order. Persist all of them against one set of paused messages and only replay
+> when every one has an answer — a half-answered run is as unreplayable as an
+> unanswered one. `requests.remaining(results)` returns what is still outstanding.
+
+> **`build_results` is worth using over a hand-built `DeferredToolResults`.** It
+> validates the ids against the pause they came from, so a stale or forged
+> `tool_call_id` raises there instead of quietly resuming a run with a tool call
+> left dangling. A plain `bool` is accepted for approvals and any plain value for
+> calls.
+
+Choosing between them is one question: *is the human supplying permission, or
+data?* Permission is `ApprovalRequired`. Data — a selection, a password, a
+timezone, a page the browser rendered — is `CallDeferred`. Getting it backwards
+means either a yes/no dialog for something that needed a value, or a tool that
+re-runs when it should not.
+
 ---
 
 ## 15. Follow-ups and the scope gate
@@ -847,7 +897,7 @@ of model calls. Cap the count and the concurrency (`max_images_per_document`,
 | `app/ziza_chat/service.py` | Orchestration and the scope gate |
 | `tests/conftest.py` | Offline test harness |
 | `app/ziza_chat/history_store/` | Conversation memory: turns, trimming, summary, repair |
-| `app/ziza_chat/hitl/` | Pending approvals |
-| `app/ziza_chat/tools/knowledge.py` | The approval-gated tool |
+| `app/ziza_chat/hitl/` | Paused runs: approvals and deferred calls |
+| `app/ziza_chat/tools/knowledge.py` | The approval-gated and deferred tools |
 | `app/ziza_chat/agents/conversation_summary.py` | Rolling summariser |
 | `evals/classifier_evals.py` | Quality evaluation |

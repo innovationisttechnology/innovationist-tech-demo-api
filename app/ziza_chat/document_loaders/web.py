@@ -11,7 +11,7 @@ import ipaddress
 import logging
 import socket
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -158,3 +158,48 @@ def html_to_text(body: bytes) -> str:
         text = " ".join(soup.get_text(" ", strip=True).split())
         return text
     return "\n\n".join(blocks)
+
+
+MAX_CANDIDATE_LINKS = 10
+
+
+@dataclass(frozen=True)
+class CandidateLink:
+    url: str
+    text: str
+
+
+def extract_links(
+    body: bytes, base_url: str, limit: int = MAX_CANDIDATE_LINKS
+) -> list[CandidateLink]:
+    """Same-origin links found on a page, in document order.
+
+    Read from the raw HTML rather than from html_to_text output: that strips
+    nav, header, footer, and aside, which is exactly where a site keeps the
+    links to the rest of itself. Same-origin only, because offering a visitor
+    every outbound link on a page turns one request into an open crawl.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(body, "html.parser")
+    origin = urlparse(base_url).netloc
+    already_offered = {base_url.rstrip("/")}
+    candidates: list[CandidateLink] = []
+
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href")
+        if not isinstance(href, str):
+            continue
+        resolved = urlparse(urljoin(base_url, href))
+        if resolved.scheme not in ("http", "https") or resolved.netloc != origin:
+            continue
+        normalized = resolved._replace(fragment="").geturl()
+        if normalized.rstrip("/") in already_offered:
+            continue
+        already_offered.add(normalized.rstrip("/"))
+        label = " ".join(anchor.get_text(" ", strip=True).split())
+        candidates.append(CandidateLink(url=normalized, text=label[:120] or normalized))
+        if len(candidates) >= limit:
+            break
+
+    return candidates

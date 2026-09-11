@@ -15,7 +15,11 @@ from pydantic_ai.messages import (
 )
 
 from app.ziza_chat.history_store.models import ConversationSummary, ConversationTurn
-from app.ziza_chat.history_store.repair import drop_unresolved_tool_calls
+from app.ziza_chat.history_store.repair import (
+    drop_orphan_tool_returns,
+    drop_unresolved_tool_calls,
+    resolved_tool_call_ids,
+)
 from app.ziza_chat.history_store.summary import build_summary_turn
 from app.ziza_chat.history_store.trimming import turns_to_drop
 
@@ -55,7 +59,13 @@ def build_declined_turn(
     The paused messages hold a tool call with no result. Answering it here
     keeps the pair complete, so the transcript stays replayable and still
     records that the action was offered and not taken.
+
+    Only the unanswered calls get an answer. A turn can reach the pause having
+    already run other tools — a search before the deferral — and answering
+    those a second time puts a tool result in the transcript whose tool call is
+    no longer the preceding message, which Anthropic rejects outright.
     """
+    already_answered = resolved_tool_call_ids(paused_messages)
     answers = [
         ToolReturnPart(
             tool_name=part.tool_name,
@@ -66,6 +76,7 @@ def build_declined_turn(
         if isinstance(message, ModelResponse)
         for part in message.parts
         if isinstance(part, ToolCallPart)
+        if part.tool_call_id not in already_answered
     ]
     if not answers:
         return []
@@ -112,7 +123,9 @@ class MongoHistoryStore:
             .to_list()
         )
         return drop_unresolved_tool_calls(
-            deserialize_turns([turn.messages for turn in turns])
+            drop_orphan_tool_returns(
+                deserialize_turns([turn.messages for turn in turns])
+            )
         )
 
     @staticmethod

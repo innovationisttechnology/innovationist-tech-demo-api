@@ -26,6 +26,57 @@ def resolved_tool_call_ids(messages: Sequence[ModelMessage]) -> set[str]:
     }
 
 
+def drop_orphan_tool_returns(
+    messages: Sequence[ModelMessage],
+) -> list[ModelMessage]:
+    """Remove tool results that no preceding tool call accounts for.
+
+    The mirror of drop_unresolved_tool_calls, and the half that bricks a
+    session rather than degrading it: Anthropic requires every tool result to
+    answer a call in the message directly before it, so one stray result makes
+    every later request in that session a 400. Repairing on load is what lets a
+    transcript already holding one recover instead of staying poisoned until
+    its TTL expires.
+    """
+    offered: set[str] = set()
+    answered: set[str] = set()
+    repaired: list[ModelMessage] = []
+    dropped = 0
+
+    for message in messages:
+        if isinstance(message, ModelResponse):
+            offered.update(
+                part.tool_call_id
+                for part in message.parts
+                if isinstance(part, ToolCallPart)
+            )
+            repaired.append(message)
+            continue
+
+        kept_parts = []
+        for part in message.parts:
+            if isinstance(part, ToolReturnPart):
+                if part.tool_call_id not in offered or part.tool_call_id in answered:
+                    dropped += 1
+                    continue
+                answered.add(part.tool_call_id)
+            kept_parts.append(part)
+
+        if not kept_parts:
+            continue
+        repaired.append(
+            message
+            if len(kept_parts) == len(message.parts)
+            else replace(message, parts=kept_parts)
+        )
+
+    if dropped:
+        logger.warning(
+            "Dropped %d unmatched tool result(s) from replayed history", dropped
+        )
+    return repaired
+
+
 def drop_unresolved_tool_calls(
     messages: Sequence[ModelMessage],
 ) -> list[ModelMessage]:

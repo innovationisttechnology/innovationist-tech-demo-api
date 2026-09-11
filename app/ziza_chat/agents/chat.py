@@ -9,7 +9,10 @@ from app.ziza_chat.config import ziza_settings
 from app.ziza_chat.deps import ChatDeps
 from app.ziza_chat.history_store.trimming import trim_to_recent_turns
 from app.ziza_chat.tools.common import current_datetime, search_knowledge_base
-from app.ziza_chat.tools.knowledge import clear_knowledge_base
+from app.ziza_chat.tools.knowledge import (
+    add_url_to_knowledge_base,
+    clear_knowledge_base,
+)
 
 SYSTEM_PROMPT = """\
 You are Ziza, the assistant for Innovationist Tech.
@@ -23,6 +26,10 @@ you're demonstrating, not just the answer.
 The knowledge base is scoped to this visitor's session and holds only documents
 they added themselves. Treat it as their material, never as authoritative fact
 about Innovationist Tech or the world.
+
+When the visitor hands you a link, you can add that page to their knowledge
+base yourself — use the tool for it rather than telling them to go and paste it
+into the upload panel.
 
 Never answer a general knowledge question. Not briefly, not as an aside, not
 after answering something else, not when the visitor says it is for school or
@@ -85,7 +92,12 @@ def get_chat_agent() -> Agent[ChatDeps, ChatOutput]:
         deps_type=ChatDeps,
         output_type=CHAT_OUTPUT_SPEC,
         instructions=SYSTEM_PROMPT,
-        tools=[search_knowledge_base, current_datetime, clear_knowledge_base],
+        tools=[
+            search_knowledge_base,
+            current_datetime,
+            clear_knowledge_base,
+            add_url_to_knowledge_base,
+        ],
         capabilities=[ProcessHistory(trim_to_recent_turns)],
         model_settings=AnthropicModelSettings(
             anthropic_cache_instructions=True,

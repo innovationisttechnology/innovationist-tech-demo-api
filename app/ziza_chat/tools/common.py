@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from pydantic_ai import RunContext
 
-from app.ziza_chat.deps import ChatDeps
+from app.ziza_chat.deps import ChatDeps, SearchOutcome
 from app.ziza_chat.vector_store.store import RetrievedChunk
 
 
@@ -47,4 +47,11 @@ async def search_knowledge_base(context: RunContext[ChatDeps], query: str) -> st
     if store is None:
         return "The knowledge base is not available in this session."
     retrieved = await store.search(context.deps.session_id, query)
+    context.deps.searches.append(
+        SearchOutcome(
+            query=query,
+            matches=len(retrieved),
+            best_score=retrieved[0].score if retrieved else None,
+        )
+    )
     return format_retrieved_chunks(query, retrieved)
