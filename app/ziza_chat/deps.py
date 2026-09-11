@@ -26,6 +26,9 @@ class ChatDeps:
     documents: list[str] = field(default_factory=list)
     # None when MongoDB is not configured; the search tool degrades gracefully.
     vector_store: MongoVectorStore | None = None
+    # A page this message pointed at that the session does not hold yet, so
+    # the agent is told which URL to pass rather than having to find it.
+    mentioned_url: str | None = None
     # Written by search_knowledge_base and read after the run, so the caller
     # knows how retrieval actually went without parsing the answer text.
     searches: list[SearchOutcome] = field(default_factory=list)

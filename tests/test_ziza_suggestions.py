@@ -70,7 +70,11 @@ class TestChoosingWhatToSuggest:
             "https://example.com/a"
         ]
         assert suggestions[0].kind is SuggestionKind.ADD_PAGE
-        assert suggestions[0].source_url == "https://example.com/"
+        # Acting on it sends a chat message, so the page still goes through the
+        # deferred tool that asks before indexing.
+        assert suggestions[0].message == (
+            "Add https://example.com/a to my knowledge base"
+        )
 
     @pytest.mark.anyio
     async def test_a_link_already_indexed_is_not_offered(

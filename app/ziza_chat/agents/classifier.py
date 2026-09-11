@@ -80,6 +80,13 @@ Also decide retrieval routing:
   a short name, subject, or concept, not the full message. Otherwise null.
 - rag_ambiguous: true if rag_query is vague, partial, or could match multiple
   things (e.g. a first name only, or "the project").
+- mentioned_url: the web page the visitor pointed at, copied exactly as they
+  wrote it, including a bare domain with no scheme. Set it whenever the message
+  names a site to read or add — "tell me about xyz.com", "add https://a.io/b",
+  "can you read acme.co.uk/pricing". Null otherwise, and null for things that
+  merely look like domains: filenames ("report.md", "index.html"), libraries
+  and runtimes ("node.js", "React"), and abbreviations ("e.g."). Do not repair,
+  complete, or guess a URL — copy what is there or return null.
 
 Examples:
 - "Hi there!" -> intents: [greeting], scope: assistant, needs_rag: false
@@ -103,10 +110,9 @@ Examples:
 - previous: "what does the handbook say about releases?" / now: "summarise it"
   -> intents: [task request, follow-up], scope: knowledge base,
   needs_rag: true, rag_query: "handbook releases", rag_ambiguous: false
-- "Add https://example.com/docs/guide to my knowledge base" ->
-  intents: [task request], scope: assistant, needs_rag: false
 - "Read this and tell me about it: https://example.com/pricing" ->
-  intents: [task request], scope: assistant, needs_rag: false
+  intents: [task request], scope: assistant, needs_rag: false,
+  mentioned_url: "https://example.com/pricing"
 - "Delete everything I've uploaded" -> intents: [task request],
   scope: assistant, needs_rag: false
 - "What documents do you have for me?" -> intents: [question],
@@ -115,7 +121,18 @@ Examples:
   scope: knowledge base, needs_rag: true, rag_query: "website",
   rag_ambiguous: true
 - "What is this file about?" -> intents: [question], scope: knowledge base,
-  needs_rag: true, rag_query: "file", rag_ambiguous: true"""
+  needs_rag: true, rag_query: "file", rag_ambiguous: true
+- "Tell me about xyz.com" -> intents: [question], scope: assistant,
+  needs_rag: false, mentioned_url: "xyz.com"
+- "Add https://example.com/docs/guide to my knowledge base" ->
+  intents: [task request], scope: assistant, needs_rag: false,
+  mentioned_url: "https://example.com/docs/guide"
+- "Can you read acme.co.uk/pricing for me?" -> intents: [task request],
+  scope: assistant, needs_rag: false, mentioned_url: "acme.co.uk/pricing"
+- "What is node.js?" -> intents: [question], scope: out of scope,
+  needs_rag: false, mentioned_url: null
+- "Summarise report.md" -> intents: [task request], scope: knowledge base,
+  needs_rag: true, rag_query: "report.md", mentioned_url: null"""
 
 
 def build_classifier_prompt(message: str, previous_message: str | None) -> str:

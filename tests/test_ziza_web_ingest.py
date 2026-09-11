@@ -4,25 +4,16 @@ Fetching a user-supplied URL makes the server issue requests on their behalf,
 so most of these assert what is *refused* rather than what is fetched.
 """
 
-from typing import Any
-
 import pytest
 
-from app.ziza_chat import service
 from app.ziza_chat.agents.page_summary import PageSummary
-from app.ziza_chat.document_loaders.base import UnsupportedDocumentError
 from app.ziza_chat.document_loaders.web import (
     MAX_CANDIDATE_LINKS,
-    FetchedPage,
     UnsafeUrlError,
     assert_public_url,
     extract_links,
     extract_title,
     html_to_text,
-)
-from app.ziza_chat.schemas import (
-    KnowledgeIngestResponse,
-    UrlLinkSelectionRequest,
 )
 
 
@@ -182,167 +173,3 @@ class TestExtractingLinks:
         page = b'<html><a href="/icon"><img src="i.png"></a></html>'
         links = extract_links(page, "https://example.com/guide")
         assert links[0].text == "https://example.com/icon"
-
-
-class StubVectorStore:
-    def __init__(self) -> None:
-        self.sections: list[Any] = []
-
-    async def list_documents(self, session_id: str) -> list[str]:
-        return []
-
-    async def count_documents(self, session_id: str) -> int:
-        return 1
-
-    async def add_sections(self, session_id: str, sections: Any) -> int:
-        self.sections.extend(sections)
-        return len(list(sections))
-
-    async def wait_until_searchable(self, session_id: str) -> bool:
-        return True
-
-
-def install_page(monkeypatch: pytest.MonkeyPatch, body: bytes) -> StubVectorStore:
-    store = StubVectorStore()
-
-    async def fetch(url: str) -> FetchedPage:
-        return FetchedPage(
-            url=url, title="The Guide", content_type="text/html", body=body
-        )
-
-    async def no_summary(title: str, url: str, text: str) -> Any:
-        raise RuntimeError("summariser off in tests")
-
-    monkeypatch.setattr(service, "fetch_page", fetch)
-    monkeypatch.setattr(service, "summarize_page", no_summary)
-    monkeypatch.setattr(service, "get_vector_store", lambda: store)
-    return store
-
-
-PAGE_WITH_LINKS = (
-    b"<html><body><p>Some readable body text here.</p>"
-    b'<a href="/setup">Setup</a><a href="https://elsewhere.example.net/x">Off</a>'
-    b"</body></html>"
-)
-
-
-class TestTheLinkOffer:
-    @pytest.mark.anyio
-    async def test_ingesting_a_page_offers_its_links(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        install_page(monkeypatch, PAGE_WITH_LINKS)
-        result = await service.ingest_url("session-1", "https://example.com/guide")
-        assert [link.url for link in result.candidate_links] == [
-            "https://example.com/setup"
-        ]
-
-    @pytest.mark.anyio
-    async def test_the_page_is_indexed_without_waiting_for_a_choice(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Pasting a URL is an unambiguous 'index this'; only the links are open."""
-        store = install_page(monkeypatch, PAGE_WITH_LINKS)
-        result = await service.ingest_url("session-1", "https://example.com/guide")
-        assert result.chunks_ingested == 1
-        assert store.sections
-
-    @pytest.mark.anyio
-    async def test_a_selected_link_is_not_itself_an_offer(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """One level deep — indexing a link must not open another prompt."""
-        install_page(monkeypatch, PAGE_WITH_LINKS)
-        result = await service.ingest_url(
-            "session-1", "https://example.com/setup", offer_links=False
-        )
-        assert result.candidate_links == []
-
-
-class TestIngestingTheSelection:
-    @pytest.mark.anyio
-    async def test_the_selection_is_indexed(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        indexed: list[str] = []
-
-        async def fake_ingest(
-            session_id: str, url: str, offer_links: bool = True
-        ) -> Any:
-            indexed.append(url)
-            assert offer_links is False
-            return KnowledgeIngestResponse(
-                session_id=session_id, source=url, chunks_ingested=2, searchable=True
-            )
-
-        monkeypatch.setattr(service, "ingest_url", fake_ingest)
-        monkeypatch.setattr(service, "get_vector_store", lambda: StubVectorStore())
-        response = await service.ingest_offered_links(
-            UrlLinkSelectionRequest(
-                session_id="session-1",
-                url="https://example.com/guide",
-                selected_links=[
-                    "https://example.com/setup",
-                    "https://example.com/api",
-                ],
-            )
-        )
-        assert indexed == ["https://example.com/setup", "https://example.com/api"]
-        assert len(response.indexed) == 2
-        assert response.failed == []
-
-    @pytest.mark.anyio
-    async def test_an_offsite_link_is_refused(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Otherwise a 'selection' walks the server around the web."""
-        indexed: list[str] = []
-
-        async def fake_ingest(
-            session_id: str, url: str, offer_links: bool = True
-        ) -> Any:
-            indexed.append(url)
-            raise AssertionError("should never be reached")
-
-        monkeypatch.setattr(service, "ingest_url", fake_ingest)
-        with pytest.raises(service.UnofferedLinkError):
-            await service.ingest_offered_links(
-                UrlLinkSelectionRequest(
-                    session_id="session-1",
-                    url="https://example.com/guide",
-                    selected_links=["https://evil.example.net/steal"],
-                )
-            )
-        assert indexed == []
-
-    @pytest.mark.anyio
-    async def test_one_bad_link_does_not_lose_the_rest(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        async def fake_ingest(
-            session_id: str, url: str, offer_links: bool = True
-        ) -> Any:
-            if url.endswith("/setup"):
-                raise UnsupportedDocumentError("no readable text")
-            return KnowledgeIngestResponse(
-                session_id=session_id, source=url, chunks_ingested=2, searchable=True
-            )
-
-        monkeypatch.setattr(service, "ingest_url", fake_ingest)
-        monkeypatch.setattr(service, "get_vector_store", lambda: StubVectorStore())
-        response = await service.ingest_offered_links(
-            UrlLinkSelectionRequest(
-                session_id="session-1",
-                url="https://example.com/guide",
-                selected_links=[
-                    "https://example.com/setup",
-                    "https://example.com/api",
-                ],
-            )
-        )
-        assert [result.source for result in response.indexed] == [
-            "https://example.com/api"
-        ]
-        assert [failure.url for failure in response.failed] == [
-            "https://example.com/setup"
-        ]

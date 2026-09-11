@@ -126,6 +126,21 @@ def get_chat_agent() -> Agent[ChatDeps, ChatOutput]:
         )
 
     @agent.instructions
+    def add_mentioned_url(context: RunContext[ChatDeps]) -> str:
+        url = context.deps.mentioned_url
+        if not url:
+            return ""
+        # Named explicitly rather than left to the tool description: a page
+        # cannot be searched before it is added, so a message pointing at one
+        # has no useful path except the tool.
+        return (
+            f"This message points at {url}, which this session does not hold. "
+            "Add it with add_url_to_knowledge_base, passing exactly that URL, "
+            "before trying to answer from it. Searching for it first is "
+            "pointless — it is not in the knowledge base yet."
+        )
+
+    @agent.instructions
     def add_session_documents(context: RunContext[ChatDeps]) -> str:
         documents = context.deps.documents
         if not documents:

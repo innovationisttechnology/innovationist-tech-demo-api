@@ -12,6 +12,7 @@ from app.ziza_chat.document_loaders.web import (
     fetch_page,
 )
 from app.ziza_chat.knowledge_base import clear_knowledge, describe_holdings
+from app.ziza_chat.page_links import store_page_links
 from app.ziza_chat.tool_logging import log_step
 
 logger = logging.getLogger(__name__)
@@ -91,15 +92,13 @@ async def add_url_to_knowledge_base(context: RunContext[ChatDeps], url: str) -> 
 
     held = set(context.deps.documents)
     page_already_indexed = url in held
-    links = [
-        link
-        for link in (
-            extract_links(page.body, page.url)
-            if "html" in page.content_type
-            else []
-        )
-        if link.url not in held
-    ]
+    found = (
+        extract_links(page.body, page.url) if "html" in page.content_type else []
+    )
+    # Stored here rather than at ingest time because this is the only place the
+    # page's HTML is read, and a later suggestion must not cost a second fetch.
+    await store_page_links(session_id, url, found)
+    links = [link for link in found if link.url not in held]
     described = page.title or url
     if not links:
         summary = (

@@ -1,14 +1,12 @@
 import logging
 from typing import Annotated, AsyncIterator
 
-import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.db import RequiresDatabase
 from app.ziza_chat import service
 from app.ziza_chat.document_loaders import UnsupportedDocumentError
-from app.ziza_chat.document_loaders.web import UnsafeUrlError
 from app.ziza_chat.hitl.service import UnknownDeferredCallError
 from app.ziza_chat.knowledge_base import clear_knowledge
 from app.ziza_chat.schemas import (
@@ -16,12 +14,8 @@ from app.ziza_chat.schemas import (
     ChatRequest,
     ChatResponse,
     KnowledgeClearResponse,
-    KnowledgeIngestRequest,
     KnowledgeIngestResponse,
-    KnowledgeUrlRequest,
     LinkSelectionRequest,
-    UrlLinkSelectionRequest,
-    UrlLinkSelectionResponse,
 )
 from app.ziza_chat.utils import format_sse
 
@@ -73,13 +67,6 @@ async def chat_link_selection_endpoint(body: LinkSelectionRequest) -> ChatRespon
         raise HTTPException(status_code=422, detail=str(unoffered)) from unoffered
 
 
-@router.post("/knowledge", response_model=KnowledgeIngestResponse, status_code=201)
-async def ingest_knowledge_endpoint(
-    body: KnowledgeIngestRequest,
-) -> KnowledgeIngestResponse:
-    return await service.ingest_knowledge(body)
-
-
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
@@ -107,40 +94,6 @@ async def ingest_file_endpoint(
         )
     except UnsupportedDocumentError as unsupported:
         raise HTTPException(status_code=415, detail=str(unsupported)) from unsupported
-
-
-@router.post("/knowledge/url", response_model=KnowledgeIngestResponse, status_code=201)
-async def ingest_url_endpoint(body: KnowledgeUrlRequest) -> KnowledgeIngestResponse:
-    try:
-        return await service.ingest_url(body.session_id, body.url)
-    except UnsafeUrlError as unsafe:
-        raise HTTPException(status_code=422, detail=str(unsafe)) from unsafe
-    except UnsupportedDocumentError as unsupported:
-        raise HTTPException(status_code=415, detail=str(unsupported)) from unsupported
-    except httpx.HTTPError as network_failure:
-        logger.warning("Fetch failed for %s: %s", body.url, network_failure)
-        raise HTTPException(
-            status_code=502, detail=f"Could not reach {body.url}."
-        ) from network_failure
-
-
-@router.post(
-    "/knowledge/url/links",
-    response_model=UrlLinkSelectionResponse,
-    status_code=201,
-)
-async def ingest_url_links_endpoint(
-    body: UrlLinkSelectionRequest,
-) -> UrlLinkSelectionResponse:
-    """Index pages offered as `candidate_links` by a previous /knowledge/url call.
-
-    The page itself is already indexed by then; this is only the follow-up
-    question of how much of the rest of the site to take with it.
-    """
-    try:
-        return await service.ingest_offered_links(body)
-    except service.UnofferedLinkError as offsite:
-        raise HTTPException(status_code=422, detail=str(offsite)) from offsite
 
 
 @router.delete("/knowledge/{session_id}", response_model=KnowledgeClearResponse)

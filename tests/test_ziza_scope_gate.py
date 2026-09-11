@@ -52,6 +52,7 @@ def classification(
     rag_query: str | None = None,
     needs_rag: bool = True,
     rag_ambiguous: bool = False,
+    mentioned_url: str | None = None,
 ) -> ClassifyResult:
     return ClassifyResult(
         scope=scope,
@@ -59,6 +60,7 @@ def classification(
         needs_rag=needs_rag,
         rag_query=rag_query,
         rag_ambiguous=rag_ambiguous,
+        mentioned_url=mentioned_url,
     )
 
 
@@ -301,3 +303,108 @@ class TestAVagueReference:
             "explain it to me",
         )
         assert refusal is not None
+
+
+class TestNormalizingAMentionedUrl:
+    @pytest.mark.parametrize(
+        "mentioned,expected",
+        [
+            ("xyz.com", "https://xyz.com"),
+            ("acme.co.uk/pricing", "https://acme.co.uk/pricing"),
+            ("https://a.io/b", "https://a.io/b"),
+            ("http://a.io", "http://a.io"),
+            ("xyz.com.", "https://xyz.com"),
+            ("(https://a.com)", "https://a.com"),
+        ],
+    )
+    def test_a_page_reference_becomes_fetchable(
+        self, mentioned: str, expected: str
+    ) -> None:
+        assert service.normalize_url(mentioned) == expected
+
+    @pytest.mark.parametrize(
+        "mentioned", [None, "", "   ", "what is React", "a@b.com", "just words here"]
+    )
+    def test_anything_not_url_shaped_is_refused(self, mentioned: str | None) -> None:
+        """The scheme is added in code, so prose from the model cannot reach
+        the fetcher."""
+        assert service.normalize_url(mentioned) is None
+
+
+class TestAMentionedPage:
+    @pytest.mark.anyio
+    async def test_a_bare_domain_opens_the_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """"tell me about xyz.com" has no scheme, so the regex alone misses it."""
+        store = install_store(monkeypatch, [], [])
+        refusal = await service.resolve_scope(
+            "session-1",
+            classification(
+                Scope.KNOWLEDGE_BASE, "xyz.com", mentioned_url="xyz.com"
+            ),
+            "tell me about xyz.com",
+        )
+        assert refusal is None
+        assert store.searched == []
+
+    @pytest.mark.anyio
+    async def test_an_explicit_link_opens_the_gate_without_the_classifier(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The regex is the floor: an unambiguous link gets through even if the
+        classifier reported nothing."""
+        install_store(monkeypatch, [], [])
+        refusal = await service.resolve_scope(
+            "session-1",
+            classification(Scope.KNOWLEDGE_BASE, "guide", mentioned_url=None),
+            "read https://example.com/guide for me",
+        )
+        assert refusal is None
+
+    @pytest.mark.anyio
+    async def test_a_filename_does_not_open_the_gate(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The classifier returns null for these, so the gate still applies."""
+        store = install_store(monkeypatch, ["handbook.txt"], [])
+        refusal = await service.resolve_scope(
+            "session-1",
+            classification(Scope.KNOWLEDGE_BASE, "report.md", mentioned_url=None),
+            "summarise report.md",
+        )
+        assert refusal is not None
+        assert store.searched == ["report.md"]
+
+    @pytest.mark.anyio
+    async def test_a_page_reference_does_not_reopen_out_of_scope(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_store(monkeypatch, [], [])
+        refusal = await service.resolve_scope(
+            "session-1",
+            classification(
+                Scope.OUT_OF_SCOPE, needs_rag=False, mentioned_url="xyz.com"
+            ),
+            "what is gravity, see xyz.com",
+        )
+        assert refusal is not None
+
+
+class TestHandingTheUrlToTheAgent:
+    @pytest.mark.anyio
+    async def test_the_agent_is_told_which_url_to_pass(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_store(monkeypatch, [])
+        deps = await service.build_chat_deps("s", "question", "https://xyz.com")
+        assert deps.mentioned_url == "https://xyz.com"
+
+    @pytest.mark.anyio
+    async def test_a_page_already_held_is_not_offered_again(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Otherwise every question about a held page re-triggers the tool."""
+        install_store(monkeypatch, ["https://xyz.com"])
+        deps = await service.build_chat_deps("s", "question", "https://xyz.com")
+        assert deps.mentioned_url is None

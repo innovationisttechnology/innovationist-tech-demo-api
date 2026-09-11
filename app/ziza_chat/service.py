@@ -35,7 +35,6 @@ from app.ziza_chat.document_loaders import (
 )
 from app.ziza_chat.document_loaders.web import (
     UnsafeUrlError,
-    extract_links,
     fetch_page,
     html_to_text,
 )
@@ -61,22 +60,17 @@ from app.ziza_chat.hitl.service import (
     to_results,
     unresolved_calls,
 )
-from app.ziza_chat.page_links import load_page_links, store_page_links
+from app.ziza_chat.page_links import load_page_links
 from app.ziza_chat.schemas import (
     ApprovalDecisionRequest,
-    CandidateLinkRead,
     ChatRequest,
     ChatResponse,
     ChatStreamEvent,
-    FailedLink,
-    KnowledgeIngestRequest,
     KnowledgeIngestResponse,
     LinkSelectionRequest,
     PendingCallRead,
     Suggestion,
     SuggestionKind,
-    UrlLinkSelectionRequest,
-    UrlLinkSelectionResponse,
 )
 from app.ziza_chat.tool_logging import log_step, log_tool_events
 from app.ziza_chat.vector_store.store import (
@@ -146,7 +140,30 @@ async def classify(
 # below the noise floor and passes everything.
 GATE_MIN_SCORE = MIN_SCORE
 
-SUBMITTED_URL = re.compile(r"https?://\S+")
+# Only the unambiguous form. A bare domain cannot be told from a filename or a
+# library by pattern — "report.md", "node.js", "index.html" all match any rule
+# loose enough to catch "xyz.com" — so that judgement is the classifier's and
+# this is the deterministic floor under it.
+EXPLICIT_URL = re.compile(r"https?://\S+")
+
+URL_SHAPE = re.compile(r"^[^\s/@]+\.[a-z]{2,}(?:[/?#]\S*)?$", re.IGNORECASE)
+
+
+def normalize_url(mentioned: str | None) -> str | None:
+    """A fetchable URL from what the classifier reported, or None.
+
+    The scheme is added here rather than asked for in the prompt, and the
+    shape is checked here too: a model that returns prose, a bare word, or a
+    repaired guess must not reach the fetcher.
+    """
+    if not mentioned:
+        return None
+    candidate = mentioned.strip().strip(".,;:!?\"\'()[]<>")
+    if EXPLICIT_URL.fullmatch(candidate):
+        return candidate
+    if URL_SHAPE.fullmatch(candidate):
+        return f"https://{candidate}"
+    return None
 
 
 def refusal_for(documents: list[str]) -> str:
@@ -196,12 +213,12 @@ async def resolve_scope(
         log_step(session_id, "gate", "refused — no knowledge base in this session")
         return refusal_for([])
 
-    if SUBMITTED_URL.search(message):
+    if normalize_url(classification.mentioned_url) or EXPLICIT_URL.search(message):
         # The gate below would refuse the one thing a link is for: a page
         # cannot match a knowledge base it has not been added to yet.
         # Out-of-scope messages are already refused above, so this widens what
         # may be ingested, never what may be answered from memory.
-        log_step(session_id, "gate", "allowed — the message carries a URL to add")
+        log_step(session_id, "gate", "allowed — the message points at a web page")
         return None
 
     query = classification.rag_query or ""
@@ -247,7 +264,9 @@ async def documents_held(session_id: str) -> list[str]:
     return await get_vector_store().list_documents(session_id)
 
 
-async def build_chat_deps(session_id: str, intent: str) -> ChatDeps:
+async def build_chat_deps(
+    session_id: str, intent: str, mentioned_url: str | None = None
+) -> ChatDeps:
     vector_store = get_vector_store() if is_db_configured() else None
     documents = await vector_store.list_documents(session_id) if vector_store else []
     return ChatDeps(
@@ -255,6 +274,7 @@ async def build_chat_deps(session_id: str, intent: str) -> ChatDeps:
         intent=intent,
         vector_store=vector_store,
         documents=documents,
+        mentioned_url=None if mentioned_url in documents else mentioned_url,
     )
 
 
@@ -312,8 +332,8 @@ async def suggest_pages(session_id: str, documents: Sequence[str]) -> list[Sugge
                 Suggestion(
                     kind=SuggestionKind.ADD_PAGE,
                     label=link.text,
+                    message=f"Add {link.url} to my knowledge base",
                     url=link.url,
-                    source_url=record.document,
                 )
             )
     return suggestions[: min(MAX_SUGGESTED_PAGES, slots_left)]
@@ -453,11 +473,14 @@ async def prepare_turn(request: ChatRequest) -> RefusedTurn | ReadyTurn:
             refusal=refusal,
             documents=await documents_held(request.session_id),
         )
-    deps = await build_chat_deps(request.session_id, intent)
+    deps = await build_chat_deps(
+        request.session_id, intent, normalize_url(classification.mentioned_url)
+    )
     log_step(
         request.session_id,
         "deps",
-        f"intent={intent} documents={deps.documents or 'none'}",
+        f"intent={intent} documents={deps.documents or 'none'} "
+        f"url={deps.mentioned_url or 'none'}",
     )
     return ReadyTurn(intent=intent, history=history, deps=deps)
 
@@ -627,6 +650,12 @@ async def resolve_approval(request: ApprovalDecisionRequest) -> ChatResponse:
 
 
 @dataclass
+class FailedLink:
+    url: str
+    reason: str
+
+
+@dataclass
 class LinkIngestOutcome:
     indexed: list[KnowledgeIngestResponse]
     failed: list[FailedLink]
@@ -647,7 +676,7 @@ async def ingest_each(
     for target in dict.fromkeys(urls):
         try:
             outcome.indexed.append(
-                await ingest_url(session_id, target, offer_links=False)
+                await ingest_url(session_id, target)
             )
         except (
             SessionLimitError,
@@ -703,33 +732,6 @@ async def ingest_link_selection(
     return " ".join(report)
 
 
-async def ingest_offered_links(
-    request: UrlLinkSelectionRequest,
-) -> UrlLinkSelectionResponse:
-    """Index the links offered alongside an already-ingested page.
-
-    The selection is confined to the page's own origin — the same rule
-    extract_links offered them under — so this cannot be used to walk the
-    server around the web one 'selection' at a time.
-    """
-    origin = urlparse(request.url).netloc
-    offsite = sorted(
-        link for link in request.selected_links if urlparse(link).netloc != origin
-    )
-    if offsite:
-        raise UnofferedLinkError(
-            f"Not part of {origin}: {', '.join(offsite)}."
-        )
-    outcome = await ingest_each(request.session_id, request.selected_links)
-    return UrlLinkSelectionResponse(
-        session_id=request.session_id,
-        indexed=outcome.indexed,
-        failed=outcome.failed,
-        documents_used=await get_vector_store().count_documents(request.session_id),
-        documents_allowed=ziza_settings.max_documents_per_session,
-    )
-
-
 def offered_links(call: DeferredCall) -> set[str]:
     offered = call.metadata.get("links") or []
     return {
@@ -772,25 +774,6 @@ async def resolve_link_selection(request: LinkSelectionRequest) -> ChatResponse:
         CallResolution(content=outcome),
     )
     return await resume_if_ready(resolved)
-
-
-async def ingest_knowledge(request: KnowledgeIngestRequest) -> KnowledgeIngestResponse:
-    await assert_capacity(request.session_id, request.source)
-    store = get_vector_store()
-    chunk_count = await store.add_document(
-        session_id=request.session_id,
-        text=request.text,
-        source=request.source,
-    )
-    searchable = await store.wait_until_searchable(request.session_id)
-    return KnowledgeIngestResponse(
-        session_id=request.session_id,
-        source=request.source,
-        chunks_ingested=chunk_count,
-        searchable=searchable,
-        documents_used=await store.count_documents(request.session_id),
-        documents_allowed=ziza_settings.max_documents_per_session,
-    )
 
 
 def format_source(filename: str, locator: str | None, is_image: bool = False) -> str:
@@ -912,9 +895,7 @@ async def ingest_file(
     )
 
 
-async def ingest_url(
-    session_id: str, url: str, offer_links: bool = True
-) -> KnowledgeIngestResponse:
+async def ingest_url(session_id: str, url: str) -> KnowledgeIngestResponse:
     log_step(session_id, "url", f"fetching {url}")
     # The submitted URL is the document's identity, not the URL it redirects
     # to, so re-submitting the same link never consumes a second slot.
@@ -940,11 +921,6 @@ async def ingest_url(
 
     # Taken from the body already fetched — offering the links must not cost
     # a second request to the same page.
-    candidates = extract_links(page.body, page.url) if offer_links else []
-    if offer_links:
-        log_step(session_id, "links", f"{len(candidates)} same-origin candidate(s)")
-        await store_page_links(session_id, url, candidates)
-
     text = html_to_text(page.body)
     if not text.strip():
         raise UnsupportedDocumentError(f"{page.url} has no readable text.")
@@ -984,9 +960,6 @@ async def ingest_url(
         searchable=searchable,
         documents_used=await store.count_documents(session_id),
         documents_allowed=ziza_settings.max_documents_per_session,
-        candidate_links=[
-            CandidateLinkRead(url=link.url, text=link.text) for link in candidates
-        ],
     )
 
 

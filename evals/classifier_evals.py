@@ -7,7 +7,7 @@ from pydantic_evals.evaluators import EvaluationReason, Evaluator, EvaluatorCont
 
 from app.ziza_chat.agents.outputs import ClassifyResult, Intent, Scope
 from app.ziza_chat.config import ziza_settings
-from app.ziza_chat.service import classify
+from app.ziza_chat.service import classify, normalize_url
 
 INTENT_HYPOTHESES: dict[Intent, list[str]] = {
     Intent.QUESTION: ["This is a question."],
@@ -125,14 +125,39 @@ class RetrievalRouted(Evaluator[str, ClassifyResult]):
         )
 
 
-def scope_case(name: str, message: str, scope: Scope, needs_rag: bool) -> Case[
-    str, ClassifyResult, dict[str, object]
-]:
+@dataclass
+class MentionedUrlMatches(Evaluator[str, ClassifyResult]):
+    """The URL is what makes the page tool reachable at all.
+
+    A missed one means a message pointing at a page is gated on retrieval it
+    cannot pass; an invented one sends the server after a page nobody named.
+    """
+
+    def evaluate(self, ctx: EvaluatorContext[str, ClassifyResult]) -> EvaluationReason:
+        expected = ctx.expected_output
+        wanted = expected.mentioned_url if expected else None
+        actual = ctx.output.mentioned_url
+        return EvaluationReason(
+            value=normalize_url(actual) == normalize_url(wanted),
+            reason=f"mentioned_url={actual!r} (expected {wanted!r})",
+        )
+
+
+def scope_case(
+    name: str,
+    message: str,
+    scope: Scope,
+    needs_rag: bool,
+    mentioned_url: str | None = None,
+) -> Case[str, ClassifyResult, dict[str, object]]:
     return Case(
         name=name,
         inputs=message,
         expected_output=ClassifyResult(
-            scope=scope, intents=[Intent.QUESTION], needs_rag=needs_rag
+            scope=scope,
+            intents=[Intent.QUESTION],
+            needs_rag=needs_rag,
+            mentioned_url=mentioned_url,
         ),
     )
 
@@ -151,6 +176,7 @@ SCOPE_CASES = [
         "Add https://example.com/docs/guide to my knowledge base",
         Scope.ASSISTANT,
         False,
+        mentioned_url="https://example.com/docs/guide",
     ),
     scope_case("clear_material", "Delete everything I've uploaded", Scope.ASSISTANT, False),
     scope_case(
@@ -172,12 +198,42 @@ SCOPE_CASES = [
     scope_case(
         "mixed", "Summarise the handbook, then explain gravity.", Scope.KNOWLEDGE_BASE, True
     ),
+    scope_case(
+        "bare_domain",
+        "Tell me about xyz.com",
+        Scope.ASSISTANT,
+        False,
+        mentioned_url="xyz.com",
+    ),
+    scope_case(
+        "explicit_link",
+        "What does https://example.com/pricing say?",
+        Scope.ASSISTANT,
+        False,
+        mentioned_url="https://example.com/pricing",
+    ),
+    scope_case(
+        "domain_with_path",
+        "Can you read acme.co.uk/pricing for me?",
+        Scope.ASSISTANT,
+        False,
+        mentioned_url="acme.co.uk/pricing",
+    ),
+    scope_case(
+        "library_is_not_a_url", "What is node.js?", Scope.OUT_OF_SCOPE, False
+    ),
+    scope_case(
+        "filename_is_not_a_url",
+        "Summarise report.md",
+        Scope.KNOWLEDGE_BASE,
+        True,
+    ),
 ]
 
 scope_dataset: Dataset[str, ClassifyResult] = Dataset(
     name="scope-classifier",
     cases=SCOPE_CASES,
-    evaluators=[ScopeMatches(), RetrievalRouted()],
+    evaluators=[ScopeMatches(), RetrievalRouted(), MentionedUrlMatches()],
 )
 
 

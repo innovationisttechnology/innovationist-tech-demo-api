@@ -229,10 +229,14 @@ def install_fetch(
             url=url, title="The Guide", content_type="text/html", body=b"<html></html>"
         )
 
+    async def store(session_id: str, document: str, found: Any) -> None:
+        return None
+
     monkeypatch.setattr(knowledge_tool, "fetch_page", fetch)
     monkeypatch.setattr(
         knowledge_tool, "extract_links", lambda body, base_url: list(links)
     )
+    monkeypatch.setattr(knowledge_tool, "store_page_links", store)
     return fetched
 
 
@@ -756,7 +760,7 @@ class TestExecutingTheLinkSelection:
         monkeypatch.setattr(
             service,
             "ingest_url",
-            lambda session, url, offer_links=True: indexed.append(url),
+            lambda session, url: indexed.append(url),
         )
         with pytest.raises(service.UnofferedLinkError):
             await service.resolve_link_selection(
@@ -775,9 +779,7 @@ class TestExecutingTheLinkSelection:
         install_store(monkeypatch, FakePausedRun(calls=[link_offer()]))
         indexed: list[str] = []
 
-        async def fake_ingest(
-            session_id: str, url: str, offer_links: bool = True
-        ) -> Any:
+        async def fake_ingest(session_id: str, url: str) -> Any:
             indexed.append(url)
             return SimpleNamespace(source=url, chunks_ingested=4)
 
@@ -797,9 +799,7 @@ class TestExecutingTheLinkSelection:
     async def test_one_unreachable_link_does_not_lose_the_rest(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def fake_ingest(
-            session_id: str, url: str, offer_links: bool = True
-        ) -> Any:
+        async def fake_ingest(session_id: str, url: str) -> Any:
             if url.endswith("/setup"):
                 raise UnsupportedDocumentError("no readable text")
             return SimpleNamespace(source=url, chunks_ingested=2)
@@ -827,9 +827,7 @@ class TestExecutingTheLinkSelection:
         )
         supplied: list[Any] = []
 
-        async def fake_ingest(
-            session_id: str, url: str, offer_links: bool = True
-        ) -> Any:
+        async def fake_ingest(session_id: str, url: str) -> Any:
             return SimpleNamespace(source=url, chunks_ingested=1)
 
         async def no_history(session_id: str) -> list[Any]:
@@ -882,9 +880,7 @@ class TestTheWholeDeferredRoundTrip:
         )
         indexed: list[str] = []
 
-        async def fake_ingest(
-            session_id: str, url: str, offer_links: bool = True
-        ) -> Any:
+        async def fake_ingest(session_id: str, url: str) -> Any:
             indexed.append(url)
             return SimpleNamespace(source=url, chunks_ingested=3)
 
@@ -994,9 +990,7 @@ class TestOfferingAPageAlreadyHeld:
     ) -> None:
         indexed: list[str] = []
 
-        async def fake_ingest(
-            session_id: str, url: str, offer_links: bool = True
-        ) -> Any:
+        async def fake_ingest(session_id: str, url: str) -> Any:
             indexed.append(url)
             return SimpleNamespace(source=url, chunks_ingested=3)
 
@@ -1021,3 +1015,71 @@ class TestOfferingAPageAlreadyHeld:
             "session-1", "https://example.com/guide", [], index_base_url=False
         )
         assert "chose not to add" in outcome
+
+
+class TestTheToolStoresWhatItFound:
+    @pytest.mark.anyio
+    async def test_the_links_are_stored_for_a_later_suggestion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Nothing else reads the page's HTML, so storing here is the only way a
+        suggestion can be made later without a second fetch."""
+        install_fetch(
+            monkeypatch,
+            [
+                CandidateLink(url="https://example.com/a", text="A"),
+                CandidateLink(url="https://example.com/held", text="Held"),
+            ],
+        )
+        stored: list[tuple[str, str, int]] = []
+
+        async def capture(session_id: str, document: str, found: Any) -> None:
+            stored.append((session_id, document, len(found)))
+
+        monkeypatch.setattr(knowledge_tool, "store_page_links", capture)
+        with pytest.raises(CallDeferred):
+            await knowledge_tool.add_url_to_knowledge_base(
+                tool_context(documents=["https://example.com/held"]),
+                "https://example.com/guide",
+            )
+        # Every link found, not just the ones offered: a link already held now
+        # may be cleared later, and re-fetching to learn that would be wasteful.
+        assert stored == [("session-1", "https://example.com/guide", 2)]
+
+
+class TestTellingTheAgentWhichUrl:
+    """A pasted page is unreachable by search, so the tool is the only path.
+
+    Left to the tool description alone this depends on the model noticing; the
+    instruction names the URL for the turn it applies to.
+    """
+
+    @staticmethod
+    async def instructions_for(deps: ChatDeps) -> str:
+        seen: list[str] = []
+
+        class Probe(TestModel):
+            async def request(self, messages: Any, settings: Any, params: Any) -> Any:
+                seen.extend(
+                    message.instructions
+                    for message in messages
+                    if getattr(message, "instructions", None)
+                )
+                return await super().request(messages, settings, params)
+
+        with get_chat_agent().override(model=Probe(call_tools=[])):
+            await get_chat_agent().run("tell me about xyz.com", deps=deps)
+        return "\n".join(seen)
+
+    @pytest.mark.anyio
+    async def test_the_url_is_named_in_the_instructions(self) -> None:
+        instructions = await self.instructions_for(
+            ChatDeps(session_id="session-1", mentioned_url="https://xyz.com")
+        )
+        assert "https://xyz.com" in instructions
+        assert "add_url_to_knowledge_base" in instructions
+
+    @pytest.mark.anyio
+    async def test_no_url_adds_nothing(self) -> None:
+        instructions = await self.instructions_for(ChatDeps(session_id="session-1"))
+        assert "points at" not in instructions

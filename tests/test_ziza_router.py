@@ -30,13 +30,6 @@ DB_GATED_REQUESTS = [
      {"json": {"session_id": "s", "tool_call_id": "c", "approved": True}}),
     ("post", "/api/ziza/chat/links", "/api/ziza/chat/links",
      {"json": {"session_id": "s", "tool_call_id": "c", "selected_links": []}}),
-    ("post", "/api/ziza/knowledge", "/api/ziza/knowledge",
-     {"json": {"session_id": "s", "source": "notes", "text": "hello"}}),
-    ("post", "/api/ziza/knowledge/url", "/api/ziza/knowledge/url",
-     {"json": {"session_id": "s", "url": "https://example.com"}}),
-    ("post", "/api/ziza/knowledge/url/links", "/api/ziza/knowledge/url/links",
-     {"json": {"session_id": "s", "url": "https://example.com",
-               "selected_links": ["https://example.com/a"]}}),
     ("post", "/api/ziza/knowledge/file", "/api/ziza/knowledge/file",
      {"data": {"session_id": "s"}, "files": {"file": ("a.txt", b"hi", "text/plain")}}),
     ("delete", "/api/ziza/knowledge/s", "/api/ziza/knowledge/{session_id}", {}),
@@ -307,65 +300,3 @@ class TestLinkSelectionEndpoint:
             json={"session_id": "s", "tool_call_id": "call_1"},
         )
         assert response.status_code == 409
-
-
-class TestUrlLinkEndpoint:
-    def test_a_selection_is_indexed(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from app.ziza_chat.schemas import UrlLinkSelectionResponse
-
-        allow_db(monkeypatch)
-
-        async def fake_ingest(request: Any) -> UrlLinkSelectionResponse:
-            assert request.url == "https://example.com/guide"
-            return UrlLinkSelectionResponse(
-                session_id=request.session_id, documents_used=3, documents_allowed=10
-            )
-
-        monkeypatch.setattr(service, "ingest_offered_links", fake_ingest)
-        response = client.post(
-            "/api/ziza/knowledge/url/links",
-            json={
-                "session_id": "s",
-                "url": "https://example.com/guide",
-                "selected_links": ["https://example.com/guide/setup"],
-            },
-        )
-        assert response.status_code == 201
-        assert response.json()["documents_used"] == 3
-
-    def test_an_empty_selection_is_rejected(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Unlike the chat flow, there is no page left to index on its own."""
-        allow_db(monkeypatch)
-        response = client.post(
-            "/api/ziza/knowledge/url/links",
-            json={
-                "session_id": "s",
-                "url": "https://example.com/guide",
-                "selected_links": [],
-            },
-        )
-        assert response.status_code == 422
-
-    def test_an_offsite_link_is_rejected(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        allow_db(monkeypatch)
-
-        async def fake_ingest(request: Any) -> Any:
-            raise service.UnofferedLinkError("Not part of example.com: evil.net.")
-
-        monkeypatch.setattr(service, "ingest_offered_links", fake_ingest)
-        response = client.post(
-            "/api/ziza/knowledge/url/links",
-            json={
-                "session_id": "s",
-                "url": "https://example.com/guide",
-                "selected_links": ["https://evil.net/x"],
-            },
-        )
-        assert response.status_code == 422
-        assert "Not part of" in response.text
