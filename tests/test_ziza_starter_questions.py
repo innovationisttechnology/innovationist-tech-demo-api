@@ -1,9 +1,9 @@
 """Tests for the opening questions offered when a document is added.
 
 A visitor who has just uploaded a file has read none of it, so these are the
-fastest route from "I added something" to "I know whether it holds what I
-came for". They go through the same retrieval check the scope gate uses, so one
-that reaches the visitor cannot be refused when clicked.
+fastest route from "I added something" to "I know whether it holds what I came
+for". They are a cold start and nothing else: offered once, retired the moment
+the visitor asks anything, and never offered again in that session.
 """
 
 from typing import Any, Sequence
@@ -38,6 +38,7 @@ def install(
     monkeypatch: pytest.MonkeyPatch,
     written: Sequence[str],
     answerable: Sequence[str] | None = None,
+    wanted: bool = True,
 ) -> list[tuple[str, str, list[StoredQuestion]]]:
     stored: list[tuple[str, str, list[StoredQuestion]]] = []
 
@@ -49,8 +50,12 @@ def install(
     ) -> None:
         stored.append((session_id, document, list(questions)))
 
+    async def are_wanted(session_id: str) -> bool:
+        return wanted
+
     monkeypatch.setattr(service, "propose_starter_questions", write)
     monkeypatch.setattr(service, "store_starter_questions", store)
+    monkeypatch.setattr(service, "starters_are_wanted", are_wanted)
     monkeypatch.setattr(
         service,
         "get_vector_store",
@@ -132,10 +137,75 @@ class TestTheWriter:
         )
 
 
-class StubStored:
-    def __init__(self, document: str, questions: list[StoredQuestion]) -> None:
+class StubStarters:
+    def __init__(
+        self,
+        document: str | None,
+        questions: list[StoredQuestion],
+        conversation_started: bool = False,
+    ) -> None:
         self.document = document
         self.questions = questions
+        self.conversation_started = conversation_started
+
+
+def install_stored(monkeypatch: pytest.MonkeyPatch, stored: Any) -> None:
+    async def load(session_id: str) -> Any:
+        return stored
+
+    monkeypatch.setattr(service, "load_starters", load)
+
+
+class TestOfferingThemOnlyOnce:
+    @pytest.mark.anyio
+    async def test_a_session_already_in_conversation_writes_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """And costs no model call — the check happens before the writer."""
+        called: list[str] = []
+        stored = install(monkeypatch, ["Q?"], wanted=False)
+
+        async def must_not_run(document: str, text: str) -> list[str]:
+            called.append(document)
+            return ["Q?"]
+
+        monkeypatch.setattr(service, "propose_starter_questions", must_not_run)
+        assert await service.starter_questions("s", "second.pdf", "text") == []
+        assert called == []
+        assert stored == []
+
+    @pytest.mark.anyio
+    async def test_no_database_offers_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install(monkeypatch, ["Q?"])
+        monkeypatch.setattr(service, "is_db_configured", lambda: False)
+        assert await service.starter_questions("s", "handbook.pdf", "text") == []
+
+    @pytest.mark.anyio
+    async def test_asking_anything_retires_them(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        retired: list[str] = []
+
+        async def mark(session_id: str) -> None:
+            retired.append(session_id)
+
+        monkeypatch.setattr(service, "mark_conversation_started", mark)
+        monkeypatch.setattr(service, "is_db_configured", lambda: True)
+        await service.retire_starters("session-1")
+        assert retired == ["session-1"]
+
+    @pytest.mark.anyio
+    async def test_retiring_is_skipped_without_a_database(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def must_not_run(session_id: str) -> None:
+            raise AssertionError("touched the database when there is none")
+
+        monkeypatch.setattr(service, "mark_conversation_started", must_not_run)
+        monkeypatch.setattr(service, "is_db_configured", lambda: False)
+        await service.retire_starters("session-1")
 
 
 class TestReadingThemBack:
@@ -143,26 +213,38 @@ class TestReadingThemBack:
     async def test_the_newest_document_is_the_one_offered(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Three uploads mean three questions about the newest, not nine."""
-
-        async def load(session_id: str) -> Any:
-            return StubStored(
-                "third.pdf", [StoredQuestion(label="Q?", message="Q?")]
-            )
-
-        monkeypatch.setattr(service, "load_latest_starter_questions", load)
+        """Two uploads before asking mean three questions about the newer."""
+        install_stored(
+            monkeypatch,
+            StubStarters("second.pdf", [StoredQuestion(label="Q?", message="Q?")]),
+        )
         response = await service.latest_starter_questions("s")
-        assert response.document == "third.pdf"
+        assert response.document == "second.pdf"
         assert [s.message for s in response.suggestions] == ["Q?"]
 
     @pytest.mark.anyio
     async def test_nothing_stored_is_an_empty_answer(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def load(session_id: str) -> Any:
-            return None
+        install_stored(monkeypatch, None)
+        response = await service.latest_starter_questions("s")
+        assert response.suggestions == []
+        assert response.document is None
 
-        monkeypatch.setattr(service, "load_latest_starter_questions", load)
+    @pytest.mark.anyio
+    async def test_a_started_conversation_reads_back_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Belt and braces: retiring clears the questions, and the read refuses
+        to serve them even if a stale row still held some."""
+        install_stored(
+            monkeypatch,
+            StubStarters(
+                "handbook.pdf",
+                [StoredQuestion(label="Q?", message="Q?")],
+                conversation_started=True,
+            ),
+        )
         response = await service.latest_starter_questions("s")
         assert response.suggestions == []
         assert response.document is None

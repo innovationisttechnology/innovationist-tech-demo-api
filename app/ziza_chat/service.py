@@ -77,7 +77,9 @@ from app.ziza_chat.schemas import (
 )
 from app.ziza_chat.starter_questions import (
     StoredQuestion,
-    load_latest_starter_questions,
+    load_starters,
+    mark_conversation_started,
+    starters_are_wanted,
     store_starter_questions,
 )
 from app.ziza_chat.tool_logging import log_step, log_tool_events
@@ -567,8 +569,19 @@ async def prepare_turn(request: ChatRequest) -> RefusedTurn | ReadyTurn:
     return ReadyTurn(intent=intent, history=history, deps=deps)
 
 
+async def retire_starters(session_id: str) -> None:
+    """The offer ends the moment the visitor asks anything.
+
+    Including a message the gate goes on to refuse: they have engaged, which is
+    all the opening questions were there to prompt.
+    """
+    if is_db_configured():
+        await mark_conversation_started(session_id)
+
+
 async def chat(request: ChatRequest) -> ChatResponse:
     log_step(request.session_id, "chat", f"buffered {request.message!r}")
+    await retire_starters(request.session_id)
     prepared = await prepare_turn(request)
     if isinstance(prepared, RefusedTurn):
         return ChatResponse(
@@ -612,6 +625,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatStreamEvent]:
     log_step(request.session_id, "chat", f"streaming {request.message!r}")
+    await retire_starters(request.session_id)
     prepared = await prepare_turn(request)
     if isinstance(prepared, RefusedTurn):
         yield ChatStreamEvent(type="chat.chunk", chunk=prepared.refusal)
@@ -933,12 +947,18 @@ async def starter_questions(
 ) -> list[Suggestion]:
     """Opening questions for a document that was just added, or none.
 
+    Offered once per session and only before the visitor has asked anything.
+    Someone already in conversation has found their own way in, so a later
+    upload writes nothing and costs no model call.
+
     Put through the same retrieval check the scope gate uses, because a
     question written from the raw text is not automatically one the chunked and
     embedded version can answer — and offering a question the demo would then
     refuse is worse than offering none. Generation failing costs the questions
     and nothing else; the document is already indexed by this point.
     """
+    if not is_db_configured() or not await starters_are_wanted(session_id):
+        return []
     try:
         written = await propose_starter_questions(document, text)
         grounded = await keep_answerable(session_id, written)
@@ -963,8 +983,8 @@ async def starter_questions(
 
 
 async def latest_starter_questions(session_id: str) -> StarterQuestionsResponse:
-    stored = await load_latest_starter_questions(session_id)
-    if stored is None:
+    stored = await load_starters(session_id)
+    if stored is None or stored.conversation_started:
         return StarterQuestionsResponse(session_id=session_id)
     return StarterQuestionsResponse(
         session_id=session_id,
