@@ -20,7 +20,10 @@ from app.ziza_chat.agents.classifier import (
 from app.ziza_chat.agents.followups import choose_followup, propose_followups
 from app.ziza_chat.agents.outputs import ClassifyResult, Scope
 from app.ziza_chat.agents.page_summary import summarize_page
-from app.ziza_chat.agents.starter_questions import propose_starter_questions
+from app.ziza_chat.agents.starter_questions import (
+    keep_answered,
+    propose_starter_questions,
+)
 from app.ziza_chat.agents.vision import describe_image
 from app.ziza_chat.caption_cache import (
     carries_no_information,
@@ -951,25 +954,30 @@ async def starter_questions(
     Someone already in conversation has found their own way in, so a later
     upload writes nothing and costs no model call.
 
-    Put through the same retrieval check the scope gate uses, because a
-    question written from the raw text is not automatically one the chunked and
-    embedded version can answer — and offering a question the demo would then
-    refuse is worse than offering none. Generation failing costs the questions
-    and nothing else; the document is already indexed by this point.
+    Filtered twice, because the two filters catch different things. Retrieval
+    proves the chunked and embedded copy holds something close to the question,
+    which the raw text alone does not guarantee. A grader then reads the
+    document and decides whether it *answers* the question — retrieval cannot,
+    since a question quoted in a call script is the closest possible match to
+    itself and the one thing the script cannot answer.
+
+    Generation failing costs the questions and nothing else; the document is
+    already indexed by this point.
     """
     if not is_db_configured() or not await starters_are_wanted(session_id):
         return []
     try:
         written = await propose_starter_questions(document, text)
-        grounded = await keep_answerable(session_id, written)
+        retrievable = await keep_answerable(session_id, written)
+        grounded = await keep_answered(document, text, retrievable)
     except Exception as failure:
         logger.warning("Could not write starter questions for %s: %s", document, failure)
         return []
-    logger.info(
-        "starter questions for %s: %d written, %d answerable",
-        document,
-        len(written),
-        len(grounded),
+    log_step(
+        session_id,
+        "starters",
+        f"{document}: {len(written)} written, {len(retrievable)} retrievable, "
+        f"{len(grounded)} answered",
     )
     await store_starter_questions(
         session_id,

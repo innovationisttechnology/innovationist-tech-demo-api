@@ -49,6 +49,9 @@ What to avoid:
 - Vague openers — "tell me more", "what else", "can you elaborate". They carry
   no information and could follow any answer at all.
 - Anything the passages give you no reason to believe is covered.
+- Questions the passages merely *contain* rather than answer. A passage quoted
+  from a call script, form, or checklist is a list of things nobody knows yet;
+  asking one back gets the visitor told to go and ask someone else.
 
 Return up to five, ordered best first. Returning fewer is better than padding,
 and returning none is correct when the material genuinely offers nothing worth
@@ -114,7 +117,7 @@ def get_followup_writer() -> Agent[None, FollowUpCandidates]:
 @lru_cache
 def get_followup_grader() -> Agent[None, FollowUpChoice]:
     return Agent[None, FollowUpChoice](
-        ziza_settings.ziza_followup_grader_model,
+        ziza_settings.ziza_suggestion_grader_model,
         output_type=FollowUpChoice,
         instructions=GRADER_PROMPT,
         model_settings=ModelSettings(temperature=0, max_tokens=512),

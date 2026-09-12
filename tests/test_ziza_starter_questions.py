@@ -14,7 +14,9 @@ from pydantic_ai.models.test import TestModel
 from app.ziza_chat import service
 from app.ziza_chat.agents.starter_questions import (
     MAX_STARTER_QUESTIONS,
+    get_starter_grader,
     get_starter_question_agent,
+    keep_answered,
     propose_starter_questions,
 )
 from app.ziza_chat.schemas import SuggestionKind
@@ -39,11 +41,19 @@ def install(
     written: Sequence[str],
     answerable: Sequence[str] | None = None,
     wanted: bool = True,
+    answered: Sequence[str] | None = None,
 ) -> list[tuple[str, str, list[StoredQuestion]]]:
     stored: list[tuple[str, str, list[StoredQuestion]]] = []
 
     async def write(document: str, text: str) -> list[str]:
         return list(written)
+
+    async def grade(
+        document: str, text: str, candidates: Sequence[str]
+    ) -> list[str]:
+        if answered is None:
+            return list(candidates)
+        return [c for c in candidates if c in answered]
 
     async def store(
         session_id: str, document: str, questions: Sequence[StoredQuestion]
@@ -54,6 +64,7 @@ def install(
         return wanted
 
     monkeypatch.setattr(service, "propose_starter_questions", write)
+    monkeypatch.setattr(service, "keep_answered", grade)
     monkeypatch.setattr(service, "store_starter_questions", store)
     monkeypatch.setattr(service, "starters_are_wanted", are_wanted)
     monkeypatch.setattr(
@@ -248,3 +259,83 @@ class TestReadingThemBack:
         response = await service.latest_starter_questions("s")
         assert response.suggestions == []
         assert response.document is None
+
+
+class TestDroppingWhatTheDocumentOnlyAsks:
+    @pytest.mark.anyio
+    async def test_a_question_the_document_merely_contains_is_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A call script is made of open questions. Retrieval scores them
+        perfectly — they are quoted verbatim — and they are the one thing the
+        script cannot answer, so only the grader can catch this."""
+        install(
+            monkeypatch,
+            ["Is there a deadline I need to meet?"],
+            answered=[],
+        )
+        offered = await service.starter_questions(
+            "s", "Call_Script.docx", "Questions to ask: Is there a deadline?"
+        )
+        assert offered == []
+
+    @pytest.mark.anyio
+    async def test_retrieval_runs_before_the_grader(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The local check is free; the grader is a model call. Anything
+        retrieval already rejected must not reach it."""
+        graded: list[Sequence[str]] = []
+
+        async def write(document: str, text: str) -> list[str]:
+            return ["Covered?", "Not covered?"]
+
+        async def grade(
+            document: str, text: str, candidates: Sequence[str]
+        ) -> list[str]:
+            graded.append(list(candidates))
+            return list(candidates)
+
+        async def store(
+            session_id: str, document: str, questions: Sequence[StoredQuestion]
+        ) -> None:
+            return None
+
+        async def are_wanted(session_id: str) -> bool:
+            return True
+
+        monkeypatch.setattr(service, "propose_starter_questions", write)
+        monkeypatch.setattr(service, "keep_answered", grade)
+        monkeypatch.setattr(service, "store_starter_questions", store)
+        monkeypatch.setattr(service, "starters_are_wanted", are_wanted)
+        monkeypatch.setattr(service, "get_vector_store", lambda: StubStore(["Covered?"]))
+        monkeypatch.setattr(service, "is_db_configured", lambda: True)
+
+        await service.starter_questions("s", "handbook.pdf", "text")
+        assert graded == [["Covered?"]]
+
+
+class TestTheStarterGrader:
+    @pytest.mark.anyio
+    async def test_nothing_to_grade_costs_no_call(self) -> None:
+        """No model is overridden, so ALLOW_MODEL_REQUESTS=False would fail
+        this if the grader were called."""
+        assert await keep_answered("d", "text", []) == []
+
+    @pytest.mark.anyio
+    async def test_only_candidates_it_was_given_come_back(self) -> None:
+        """A grader that rewrites has stopped grading, and its text has been
+        through neither the writer's instructions nor the retrieval check."""
+        with get_starter_grader().override(
+            model=TestModel(
+                custom_output_args={"answered": ["Something I invented?", "Real?"]}
+            )
+        ):
+            assert await keep_answered("d", "text", ["Real?"]) == ["Real?"]
+
+    @pytest.mark.anyio
+    async def test_answering_none_is_a_real_answer(self) -> None:
+        with get_starter_grader().override(
+            model=TestModel(custom_output_args={"answered": []})
+        ):
+            assert await keep_answered("d", "text", ["A?", "B?"]) == []
