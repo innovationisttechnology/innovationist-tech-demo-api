@@ -16,6 +16,7 @@ pydantic_ai.models.ALLOW_MODEL_REQUESTS = False
 # provider (models are overridden with TestModel); a placeholder satisfies
 # that check without granting real access.
 os.environ.setdefault("ANTHROPIC_API_KEY", "test-placeholder-key")
+os.environ.setdefault("OPENAI_API_KEY", "test-placeholder-key")
 
 
 @pytest.fixture

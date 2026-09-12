@@ -12,7 +12,10 @@ class ChatRequest(BaseModel):
 
 
 class SuggestionKind(str, Enum):
+    # Mutually exclusive by trigger: a turn either retrieved something or it
+    # did not, so at most one kind is ever offered at a time.
     ADD_PAGE = "add_page"
+    ASK = "ask"
 
 
 class Suggestion(BaseModel):
@@ -20,8 +23,9 @@ class Suggestion(BaseModel):
 
     Not a deferred call: the run completed, the answer stands, and ignoring
     this costs nothing. Acting on one means sending `message` as an ordinary
-    chat message, so every kind resolves the same way and a page still enters
-    the knowledge base through the one path that asks before indexing.
+    chat message, so every kind resolves the same way — a page still enters the
+    knowledge base through the one path that asks before indexing, and a
+    follow-up question is just a question.
     """
 
     kind: SuggestionKind

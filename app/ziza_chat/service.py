@@ -17,6 +17,7 @@ from app.ziza_chat.agents.classifier import (
     build_classifier_prompt,
     get_classifier_agent,
 )
+from app.ziza_chat.agents.followups import choose_followup, propose_followups
 from app.ziza_chat.agents.outputs import ClassifyResult, Scope
 from app.ziza_chat.agents.page_summary import summarize_page
 from app.ziza_chat.agents.vision import describe_image
@@ -339,6 +340,80 @@ async def suggest_pages(session_id: str, documents: Sequence[str]) -> list[Sugge
     return suggestions[: min(MAX_SUGGESTED_PAGES, slots_left)]
 
 
+def answerable_passages(deps: ChatDeps) -> list[str]:
+    return [passage for search in deps.searches for passage in search.passages]
+
+
+def retrieval_succeeded(deps: ChatDeps) -> bool:
+    """True when the agent searched and something came back.
+
+    The mirror of retrieval_was_weak, and of what it offers: more material is
+    worth proposing where the knowledge base fell short, a follow-up question
+    where it has already proved it can answer.
+    """
+    return any(search.matches > 0 for search in deps.searches)
+
+
+async def answerable(session_id: str, question: str) -> bool:
+    store = get_vector_store() if is_db_configured() else None
+    if store is None:
+        return False
+    return bool(
+        await store.search(session_id, question, limit=1, min_score=GATE_MIN_SCORE)
+    )
+
+
+async def keep_answerable(session_id: str, candidates: Sequence[str]) -> list[str]:
+    """Drop candidates the scope gate would refuse if the visitor clicked them.
+
+    Suggesting a question and then declining to answer it is worse than
+    suggesting nothing. The gate searches the classifier's shortened query
+    rather than the whole question, so this is a close proxy for it rather than
+    the identical check — but it is a local embedding either way, so the cost
+    is a few vector searches rather than a model call.
+    """
+    verdicts = await asyncio.gather(
+        *(answerable(session_id, candidate) for candidate in candidates)
+    )
+    return [
+        candidate
+        for candidate, is_answerable in zip(candidates, verdicts, strict=True)
+        if is_answerable
+    ]
+
+
+async def suggest_followup(
+    session_id: str, question: str, answer: str, deps: ChatDeps
+) -> list[Suggestion]:
+    """At most one question worth asking next, or nothing.
+
+    Three chances to say no, cheapest first: the writer may return no
+    candidates, retrieval may reject every one, and the grader may judge the
+    survivors not worth showing. A suggestion that appears after every answer
+    is one nobody reads.
+    """
+    if not retrieval_succeeded(deps):
+        return []
+    try:
+        candidates = await propose_followups(
+            question, answer, answerable_passages(deps)
+        )
+        grounded = await keep_answerable(session_id, candidates)
+        chosen = await choose_followup(question, answer, grounded)
+    except Exception as failure:
+        # A suggestion is a nicety; the answer has already been given.
+        logger.warning("Could not suggest a follow-up: %s", failure)
+        return []
+    log_step(
+        session_id,
+        "followup",
+        f"{len(candidates)} written, {len(grounded)} answerable, chosen={chosen!r}",
+    )
+    if chosen is None:
+        return []
+    return [Suggestion(kind=SuggestionKind.ASK, label=chosen, message=chosen)]
+
+
 APPROVAL_FALLBACK_PROMPT = "That needs your confirmation before I can do it."
 
 CALL_FALLBACK_PROMPT = "That needs something from you before I can continue."
@@ -508,12 +583,23 @@ async def chat(request: ChatRequest) -> ChatResponse:
     answered = await handle_output(
         request.session_id, prepared.intent, result.output, result.new_messages()
     )
-    # A paused run is already asking about these same pages; adding the passive
-    # offer on top prompts twice for one decision.
-    if not answered.pending_calls and retrieval_was_weak(prepared.deps):
-        answered.suggestions = await offer_more_pages(
-            request.session_id, prepared.deps.documents, "retrieval came back empty"
-        )
+    # A paused run is already asking about these same pages; adding a passive
+    # offer on top prompts twice for one decision. The two remaining branches
+    # cannot both fire: a turn either retrieved something or it did not.
+    if not answered.pending_calls:
+        if retrieval_was_weak(prepared.deps):
+            answered.suggestions = await offer_more_pages(
+                request.session_id,
+                prepared.deps.documents,
+                "retrieval came back empty",
+            )
+        else:
+            answered.suggestions = await suggest_followup(
+                request.session_id,
+                request.message,
+                answered.response,
+                prepared.deps,
+            )
     return answered
 
 
@@ -559,16 +645,21 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatStreamEvent]:
                 request.session_id, "answered", f"streamed {len(streamed)} chars"
             )
     if deferred is None:
-        if retrieval_was_weak(prepared.deps):
-            weak_suggestions = await offer_more_pages(
+        # After the stream closes, so the visitor is already reading while the
+        # follow-up's two model calls run and they cost no perceived latency.
+        offered = (
+            await offer_more_pages(
                 request.session_id,
                 prepared.deps.documents,
                 "retrieval came back empty",
             )
-            if weak_suggestions:
-                yield ChatStreamEvent(
-                    type="chat.suggestions", suggestions=weak_suggestions
-                )
+            if retrieval_was_weak(prepared.deps)
+            else await suggest_followup(
+                request.session_id, request.message, streamed, prepared.deps
+            )
+        )
+        if offered:
+            yield ChatStreamEvent(type="chat.suggestions", suggestions=offered)
         return
     parked = await handle_pause(
         request.session_id, prepared.intent, deferred, paused_messages
