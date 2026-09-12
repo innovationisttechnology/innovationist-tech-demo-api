@@ -16,6 +16,7 @@ from app.ziza_chat.schemas import (
     KnowledgeClearResponse,
     KnowledgeIngestResponse,
     LinkSelectionRequest,
+    StarterQuestionsResponse,
 )
 from app.ziza_chat.utils import format_sse
 
@@ -94,6 +95,18 @@ async def ingest_file_endpoint(
         )
     except UnsupportedDocumentError as unsupported:
         raise HTTPException(status_code=415, detail=str(unsupported)) from unsupported
+
+
+@router.get(
+    "/knowledge/{session_id}/suggestions", response_model=StarterQuestionsResponse
+)
+async def starter_questions_endpoint(session_id: str) -> StarterQuestionsResponse:
+    """The opening questions for the most recently added document.
+
+    Read back rather than only returned at ingest, so a visitor who uploads and
+    then reloads before asking anything still has somewhere to start.
+    """
+    return await service.latest_starter_questions(session_id)
 
 
 @router.delete("/knowledge/{session_id}", response_model=KnowledgeClearResponse)

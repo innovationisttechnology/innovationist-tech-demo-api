@@ -32,6 +32,8 @@ DB_GATED_REQUESTS = [
      {"json": {"session_id": "s", "tool_call_id": "c", "selected_links": []}}),
     ("post", "/api/ziza/knowledge/file", "/api/ziza/knowledge/file",
      {"data": {"session_id": "s"}, "files": {"file": ("a.txt", b"hi", "text/plain")}}),
+    ("get", "/api/ziza/knowledge/s/suggestions",
+     "/api/ziza/knowledge/{session_id}/suggestions", {}),
     ("delete", "/api/ziza/knowledge/s", "/api/ziza/knowledge/{session_id}", {}),
 ]
 

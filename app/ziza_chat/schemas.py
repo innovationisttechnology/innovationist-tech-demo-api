@@ -80,6 +80,16 @@ class KnowledgeIngestResponse(BaseModel):
     documents_allowed: int = 0
     images_failed: int = 0
     searchable: bool
+    # Opening questions for the document just added, so a visitor who has not
+    # read it has somewhere to start. At most three, and empty when the text
+    # holds nothing specific enough to ask about.
+    suggestions: list[Suggestion] = Field(default_factory=list)
+
+
+class StarterQuestionsResponse(BaseModel):
+    session_id: str
+    document: str | None = None
+    suggestions: list[Suggestion] = Field(default_factory=list)
 
 
 class KnowledgeClearResponse(BaseModel):

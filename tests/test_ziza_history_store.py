@@ -371,6 +371,7 @@ class TestClearingTakesTheTranscript:
 
         monkeypatch.setattr(knowledge_base, "clear_captions", no_captions)
         monkeypatch.setattr(knowledge_base, "clear_page_links", no_links)
+        monkeypatch.setattr(knowledge_base, "clear_starter_questions", no_links)
         monkeypatch.setattr(
             knowledge_base, "get_vector_store", lambda: ClearableVectorStore()
         )

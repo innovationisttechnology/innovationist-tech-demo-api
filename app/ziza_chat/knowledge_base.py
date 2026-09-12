@@ -3,6 +3,7 @@ import logging
 from app.ziza_chat.caption_cache import clear_captions
 from app.ziza_chat.history_store.service import clear_history
 from app.ziza_chat.page_links import clear_page_links
+from app.ziza_chat.starter_questions import clear_starter_questions
 from app.ziza_chat.vector_store.store import get_vector_store
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,7 @@ async def clear_knowledge(session_id: str) -> int:
     if captions_removed:
         logger.info("cleared %d cached caption(s) for %s", captions_removed, session_id)
     await clear_page_links(session_id)
+    await clear_starter_questions(session_id)
     await clear_history(session_id)
     return await get_vector_store().clear(session_id)
 

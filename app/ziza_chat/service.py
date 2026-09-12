@@ -20,6 +20,7 @@ from app.ziza_chat.agents.classifier import (
 from app.ziza_chat.agents.followups import choose_followup, propose_followups
 from app.ziza_chat.agents.outputs import ClassifyResult, Scope
 from app.ziza_chat.agents.page_summary import summarize_page
+from app.ziza_chat.agents.starter_questions import propose_starter_questions
 from app.ziza_chat.agents.vision import describe_image
 from app.ziza_chat.caption_cache import (
     carries_no_information,
@@ -70,8 +71,14 @@ from app.ziza_chat.schemas import (
     KnowledgeIngestResponse,
     LinkSelectionRequest,
     PendingCallRead,
+    StarterQuestionsResponse,
     Suggestion,
     SuggestionKind,
+)
+from app.ziza_chat.starter_questions import (
+    StoredQuestion,
+    load_latest_starter_questions,
+    store_starter_questions,
 )
 from app.ziza_chat.tool_logging import log_step, log_tool_events
 from app.ziza_chat.vector_store.store import (
@@ -921,6 +928,56 @@ async def caption_images(
     return sections, failures
 
 
+async def starter_questions(
+    session_id: str, document: str, text: str
+) -> list[Suggestion]:
+    """Opening questions for a document that was just added, or none.
+
+    Put through the same retrieval check the scope gate uses, because a
+    question written from the raw text is not automatically one the chunked and
+    embedded version can answer — and offering a question the demo would then
+    refuse is worse than offering none. Generation failing costs the questions
+    and nothing else; the document is already indexed by this point.
+    """
+    try:
+        written = await propose_starter_questions(document, text)
+        grounded = await keep_answerable(session_id, written)
+    except Exception as failure:
+        logger.warning("Could not write starter questions for %s: %s", document, failure)
+        return []
+    logger.info(
+        "starter questions for %s: %d written, %d answerable",
+        document,
+        len(written),
+        len(grounded),
+    )
+    await store_starter_questions(
+        session_id,
+        document,
+        [StoredQuestion(label=question, message=question) for question in grounded],
+    )
+    return [
+        Suggestion(kind=SuggestionKind.ASK, label=question, message=question)
+        for question in grounded
+    ]
+
+
+async def latest_starter_questions(session_id: str) -> StarterQuestionsResponse:
+    stored = await load_latest_starter_questions(session_id)
+    if stored is None:
+        return StarterQuestionsResponse(session_id=session_id)
+    return StarterQuestionsResponse(
+        session_id=session_id,
+        document=stored.document,
+        suggestions=[
+            Suggestion(
+                kind=SuggestionKind.ASK, label=question.label, message=question.message
+            )
+            for question in stored.questions
+        ],
+    )
+
+
 async def ingest_file(
     session_id: str,
     filename: str,
@@ -977,6 +1034,11 @@ async def ingest_file(
     return KnowledgeIngestResponse(
         session_id=session_id,
         source=filename,
+        suggestions=await starter_questions(
+            session_id,
+            document_name,
+            "\n\n".join(section.text for section in sections),
+        ),
         chunks_ingested=chunk_count,
         images_described=len(image_sections),
         images_failed=images_failed,
@@ -1046,12 +1108,10 @@ async def ingest_url(session_id: str, url: str) -> KnowledgeIngestResponse:
     return KnowledgeIngestResponse(
         session_id=session_id,
         source=source,
+        suggestions=await starter_questions(session_id, url, text),
         chunks_ingested=chunk_count,
         pages_summarised=summarised,
         searchable=searchable,
         documents_used=await store.count_documents(session_id),
         documents_allowed=ziza_settings.max_documents_per_session,
     )
-
-
-
