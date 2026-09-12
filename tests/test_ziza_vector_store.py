@@ -16,6 +16,7 @@ from app.ziza_chat.tools.common import format_retrieved_chunks, search_knowledge
 from app.ziza_chat.vector_store.chunking import chunk_text
 from app.ziza_chat.vector_store.store import (
     ChunkLike,
+    DocumentSection,
     MongoVectorStore,
     RetrievedChunk,
     cosine_similarity,
@@ -143,3 +144,67 @@ class TestSearchKnowledgeBaseTool:
 
     def test_format_reports_no_matches(self) -> None:
         assert "No knowledge base passages" in format_retrieved_chunks("query", [])
+
+
+class FakeEmbedder:
+    def embed_passages(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0] for _ in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return [0.0]
+
+    def count_tokens(self, text: str) -> int:
+        return len(text) // 4
+
+
+def prepare(sections: list[DocumentSection]) -> list[DocumentSection]:
+    store = MongoVectorStore(FakeEmbedder())
+    return list(store._prepare_chunks(sections).values())
+
+
+def stored_document_names(chunks: list[DocumentSection]) -> set[str]:
+    return {chunk.document or chunk.source for chunk in chunks}
+
+
+class TestPrepareChunks:
+    def test_every_chunk_keeps_the_document_it_came_from(self) -> None:
+        pages = [
+            DocumentSection(
+                text=f"Body text of page {page}. " * 8,
+                source=f"handbook.pdf (page {page})",
+                document="handbook.pdf",
+            )
+            for page in range(1, 13)
+        ]
+        assert stored_document_names(prepare(pages)) == {"handbook.pdf"}
+
+    def test_sources_stay_page_level_for_citations(self) -> None:
+        pages = [
+            DocumentSection(
+                text=f"Body text of page {page}. " * 8,
+                source=f"handbook.pdf (page {page})",
+                document="handbook.pdf",
+            )
+            for page in range(1, 4)
+        ]
+        assert {chunk.source for chunk in prepare(pages)} == {
+            "handbook.pdf (page 1)",
+            "handbook.pdf (page 2)",
+            "handbook.pdf (page 3)",
+        }
+
+    def test_a_url_and_its_summary_are_one_document(self) -> None:
+        url = "https://example.com/guide"
+        sections = [
+            DocumentSection(text="Page body. " * 20, source=f"Guide ({url})", document=url),
+            DocumentSection(
+                text="Overview of the guide. " * 20,
+                source=f"Guide ({url}) [summary]",
+                document=url,
+            ),
+        ]
+        assert stored_document_names(prepare(sections)) == {url}
+
+    def test_falls_back_to_the_source_when_no_document_is_given(self) -> None:
+        section = DocumentSection(text="Pasted text. " * 20, source="pasted-notes")
+        assert stored_document_names(prepare([section])) == {"pasted-notes"}

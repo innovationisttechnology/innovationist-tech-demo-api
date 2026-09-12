@@ -159,7 +159,12 @@ class MongoVectorStore:
             )
             for chunk in chunks:
                 unique_chunks.setdefault(
-                    hash_text(chunk), DocumentSection(text=chunk, source=section.source)
+                    hash_text(chunk),
+                    DocumentSection(
+                        text=chunk,
+                        source=section.source,
+                        document=section.document,
+                    ),
                 )
         return unique_chunks
 

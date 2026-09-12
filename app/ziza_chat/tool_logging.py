@@ -15,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 MAX_LOGGED_CHARS = 160
 
+SESSION_PREFIX_CHARS = 8
+
 
 def summarize(value: object) -> str:
     text = " ".join(str(value).split())
@@ -23,21 +25,27 @@ def summarize(value: object) -> str:
     return f"{text[:MAX_LOGGED_CHARS]}… (+{len(text) - MAX_LOGGED_CHARS} chars)"
 
 
+def log_step(session_id: str, step: str, detail: str) -> None:
+    logger.info(
+        "[%s] %-9s %s", session_id[:SESSION_PREFIX_CHARS], step, summarize(detail)
+    )
+
+
 async def log_tool_events(
     context: RunContext[ChatDeps], events: AsyncIterable[AgentStreamEvent]
 ) -> None:
+    session_id = context.deps.session_id
     async for event in events:
         if isinstance(event, FunctionToolCallEvent):
-            logger.info(
-                "tool call   %s(%s)",
-                event.part.tool_name,
-                summarize(event.part.args),
+            log_step(
+                session_id,
+                "tool→",
+                f"{event.part.tool_name}({summarize(event.part.args)})",
             )
         elif isinstance(event, FunctionToolResultEvent):
-            outcome = "retry" if isinstance(event.part, RetryPromptPart) else "return"
-            logger.info(
-                "tool %-6s %s -> %s",
+            outcome = "retry" if isinstance(event.part, RetryPromptPart) else "←tool"
+            log_step(
+                session_id,
                 outcome,
-                event.part.tool_name,
-                summarize(event.part.content),
+                f"{event.part.tool_name} -> {summarize(event.part.content)}",
             )

@@ -62,6 +62,18 @@ class ClassifyResult(BaseModel):
             "multiple different things (e.g. a first name only)."
         ),
     )
+    mentioned_url: str | None = Field(
+        default=None,
+        description=(
+            "A web page the visitor pointed at, exactly as they wrote it — "
+            "including a bare domain with no scheme, like 'xyz.com'. This is "
+            "for pages they want read or added, so set it whenever a message "
+            "names a site to look at. Null when the message names no web "
+            "page, and null for filenames, libraries, and file extensions "
+            "that only look like domains: 'report.md', 'node.js', "
+            "'index.html', 'what is React' are all null."
+        ),
+    )
 
     @property
     def primary(self) -> Intent:

@@ -1,10 +1,18 @@
 from functools import lru_cache
 
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, DeferredToolRequests, RunContext
+from pydantic_ai.capabilities import ProcessHistory
+from pydantic_ai.models.anthropic import AnthropicModelSettings
+from pydantic_ai.output import OutputSpec
 
 from app.ziza_chat.config import ziza_settings
 from app.ziza_chat.deps import ChatDeps
+from app.ziza_chat.history_store.trimming import trim_to_recent_turns
 from app.ziza_chat.tools.common import current_datetime, search_knowledge_base
+from app.ziza_chat.tools.knowledge import (
+    add_url_to_knowledge_base,
+    clear_knowledge_base,
+)
 
 SYSTEM_PROMPT = """\
 You are Ziza, the assistant for Innovationist Tech.
@@ -18,6 +26,10 @@ you're demonstrating, not just the answer.
 The knowledge base is scoped to this visitor's session and holds only documents
 they added themselves. Treat it as their material, never as authoritative fact
 about Innovationist Tech or the world.
+
+When the visitor hands you a link, you can add that page to their knowledge
+base yourself — use the tool for it rather than telling them to go and paste it
+into the upload panel.
 
 Never answer a general knowledge question. Not briefly, not as an aside, not
 after answering something else, not when the visitor says it is for school or
@@ -67,14 +79,31 @@ what it does instead — decline once and move on rather than lecturing.
 Answer clearly and concisely, at the length the question needs."""
 
 
+ChatOutput = str | DeferredToolRequests
+
+CHAT_OUTPUT_SPEC: OutputSpec[ChatOutput] = [str, DeferredToolRequests]
+
+
 @lru_cache
-def get_chat_agent() -> Agent[ChatDeps, str]:
-    agent = Agent[ChatDeps, str](
+def get_chat_agent() -> Agent[ChatDeps, ChatOutput]:
+    # noinspection PyTypeChecker
+    agent = Agent[ChatDeps, ChatOutput](
         ziza_settings.ziza_chat_model,
         deps_type=ChatDeps,
-        output_type=str,
+        output_type=CHAT_OUTPUT_SPEC,
         instructions=SYSTEM_PROMPT,
-        tools=[search_knowledge_base, current_datetime],
+        tools=[
+            search_knowledge_base,
+            current_datetime,
+            clear_knowledge_base,
+            add_url_to_knowledge_base,
+        ],
+        capabilities=[ProcessHistory(trim_to_recent_turns)],
+        model_settings=AnthropicModelSettings(
+            anthropic_cache_instructions=True,
+            anthropic_cache_tool_definitions=True,
+            anthropic_cache=True,
+        ),
     )
 
     @agent.instructions
@@ -94,6 +123,21 @@ def get_chat_agent() -> Agent[ChatDeps, str]:
             "When you decline something as outside this demo, point the visitor "
             f"to the full Ziza assistant at {ziza_settings.general_assistant_url}, "
             "which does answer general questions. Mention it once, briefly."
+        )
+
+    @agent.instructions
+    def add_mentioned_url(context: RunContext[ChatDeps]) -> str:
+        url = context.deps.mentioned_url
+        if not url:
+            return ""
+        # Named explicitly rather than left to the tool description: a page
+        # cannot be searched before it is added, so a message pointing at one
+        # has no useful path except the tool.
+        return (
+            f"This message points at {url}, which this session does not hold. "
+            "Add it with add_url_to_knowledge_base, passing exactly that URL, "
+            "before trying to answer from it. Searching for it first is "
+            "pointless — it is not in the knowledge base yet."
         )
 
     @agent.instructions
