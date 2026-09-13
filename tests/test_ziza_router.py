@@ -310,3 +310,54 @@ class TestLinkSelectionEndpoint:
             json={"session_id": "s", "tool_call_id": "call_1"},
         )
         assert response.status_code == 409
+
+
+class TestHistoryPaging:
+    def test_no_limit_uses_the_default(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The client owns the page size; omitting it is not an error."""
+        from app.ziza_chat.history_store.service import DEFAULT_TRANSCRIPT_PAGE
+        from app.ziza_chat.schemas import ChatHistoryResponse
+
+        allow_db(monkeypatch)
+        asked: list[int] = []
+
+        async def fake(session_id: str, limit: int, before: Any) -> Any:
+            asked.append(limit)
+            return ChatHistoryResponse(session_id=session_id)
+
+        monkeypatch.setattr(service, "chat_history", fake)
+        assert client.get("/api/ziza/chat/s/history").status_code == 200
+        assert asked == [DEFAULT_TRANSCRIPT_PAGE]
+
+    def test_a_requested_page_size_is_passed_through(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.ziza_chat.schemas import ChatHistoryResponse
+
+        allow_db(monkeypatch)
+        asked: list[int] = []
+
+        async def fake(session_id: str, limit: int, before: Any) -> Any:
+            asked.append(limit)
+            return ChatHistoryResponse(session_id=session_id)
+
+        monkeypatch.setattr(service, "chat_history", fake)
+        client.get("/api/ziza/chat/s/history?limit=25")
+        assert asked == [25]
+
+    @pytest.mark.parametrize("limit", ["0", "51", "-1", "abc"])
+    def test_an_out_of_range_page_size_is_refused(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch, limit: str
+    ) -> None:
+        """Refused rather than clamped, so a wrong value surfaces at the call
+        site instead of as a page that is quietly the wrong size."""
+        allow_db(monkeypatch)
+
+        async def must_not_run(session_id: str, limit: int, before: Any) -> Any:
+            raise AssertionError("the service saw an invalid page size")
+
+        monkeypatch.setattr(service, "chat_history", must_not_run)
+        response = client.get(f"/api/ziza/chat/s/history?limit={limit}")
+        assert response.status_code == 422
