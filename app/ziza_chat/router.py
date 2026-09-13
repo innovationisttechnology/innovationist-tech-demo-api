@@ -15,6 +15,7 @@ from app.ziza_chat.schemas import (
     ChatResponse,
     KnowledgeClearResponse,
     KnowledgeIngestResponse,
+    KnowledgeSourcesResponse,
     LinkSelectionRequest,
     StarterQuestionsResponse,
 )
@@ -107,6 +108,12 @@ async def starter_questions_endpoint(session_id: str) -> StarterQuestionsRespons
     then reloads before asking anything still has somewhere to start.
     """
     return await service.latest_starter_questions(session_id)
+
+
+@router.get("/knowledge/{session_id}", response_model=KnowledgeSourcesResponse)
+async def list_sources_endpoint(session_id: str) -> KnowledgeSourcesResponse:
+    """Everything this session has added, for rebuilding the panel on reload."""
+    return await service.list_sources(session_id)
 
 
 @router.delete("/knowledge/{session_id}", response_model=KnowledgeClearResponse)

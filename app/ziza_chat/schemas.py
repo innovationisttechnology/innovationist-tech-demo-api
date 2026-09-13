@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -90,6 +91,25 @@ class StarterQuestionsResponse(BaseModel):
     session_id: str
     document: str | None = None
     suggestions: list[Suggestion] = Field(default_factory=list)
+
+
+class SourceKind(str, Enum):
+    FILE = "file"
+    URL = "url"
+
+
+class KnowledgeSourceRead(BaseModel):
+    document: str
+    kind: SourceKind
+    chunks: int
+    added_at: datetime
+
+
+class KnowledgeSourcesResponse(BaseModel):
+    session_id: str
+    sources: list[KnowledgeSourceRead] = Field(default_factory=list)
+    documents_used: int = 0
+    documents_allowed: int = 0
 
 
 class KnowledgeClearResponse(BaseModel):

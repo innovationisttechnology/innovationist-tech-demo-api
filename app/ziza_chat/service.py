@@ -72,8 +72,11 @@ from app.ziza_chat.schemas import (
     ChatResponse,
     ChatStreamEvent,
     KnowledgeIngestResponse,
+    KnowledgeSourceRead,
+    KnowledgeSourcesResponse,
     LinkSelectionRequest,
     PendingCallRead,
+    SourceKind,
     StarterQuestionsResponse,
     Suggestion,
     SuggestionKind,
@@ -943,6 +946,42 @@ async def caption_images(
         logger.info("indexed %s -> %s", source, result[:100].replace("\n", " "))
         sections.append(DocumentSection(text=result, source=source))
     return sections, failures
+
+
+def source_kind(document: str) -> SourceKind:
+    # A URL-ingested document is identified by the URL itself, and a file by
+    # its filename, so the name is the only thing that distinguishes them.
+    return (
+        SourceKind.URL
+        if urlparse(document).scheme in ("http", "https")
+        else SourceKind.FILE
+    )
+
+
+async def list_sources(session_id: str) -> KnowledgeSourcesResponse:
+    """What the session holds, so a reload can rebuild the panel.
+
+    Read from the chunks rather than a separate record, because the chunks are
+    what the visitor's questions are actually answered from — a source listed
+    here is one the demo can genuinely use.
+    """
+    if not is_db_configured():
+        return KnowledgeSourcesResponse(session_id=session_id)
+    stored = await get_vector_store().summarize_documents(session_id)
+    return KnowledgeSourcesResponse(
+        session_id=session_id,
+        sources=[
+            KnowledgeSourceRead(
+                document=document.document,
+                kind=source_kind(document.document),
+                chunks=document.chunks,
+                added_at=document.added_at,
+            )
+            for document in stored
+        ],
+        documents_used=len(stored),
+        documents_allowed=ziza_settings.max_documents_per_session,
+    )
 
 
 async def starter_questions(

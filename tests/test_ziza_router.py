@@ -34,6 +34,7 @@ DB_GATED_REQUESTS = [
      {"data": {"session_id": "s"}, "files": {"file": ("a.txt", b"hi", "text/plain")}}),
     ("get", "/api/ziza/knowledge/s/suggestions",
      "/api/ziza/knowledge/{session_id}/suggestions", {}),
+    ("get", "/api/ziza/knowledge/s", "/api/ziza/knowledge/{session_id}", {}),
     ("delete", "/api/ziza/knowledge/s", "/api/ziza/knowledge/{session_id}", {}),
 ]
 
@@ -65,9 +66,15 @@ class TestDatabaseGate:
         # Read from the OpenAPI schema, not app.routes: included routers are
         # nested behind a single opaque route object, so walking app.routes
         # finds no ziza paths at all and the check silently passes.
-        covered = {template for _, _, template, _ in DB_GATED_REQUESTS}
+        # Keyed on (method, path), not path alone: two verbs share
+        # /knowledge/{session_id}, and comparing paths would let a new verb on
+        # an existing path through untested.
+        covered = {(method, template) for method, _, template, _ in DB_GATED_REQUESTS}
         declared = {
-            path for path in app.openapi()["paths"] if path.startswith("/api/ziza")
+            (verb, path)
+            for path, operations in app.openapi()["paths"].items()
+            if path.startswith("/api/ziza")
+            for verb in operations
         }
         assert declared, "no ziza routes found — the check would be vacuous"
         assert declared - covered == set(), f"ungated ziza routes: {declared - covered}"
