@@ -8,6 +8,7 @@ from app.core.db.db_config import is_db_configured
 from app.ziza_chat.agents.conversation_summary import fold_into_summary
 from app.ziza_chat.history_store.store import build_refusal_turn, get_history_store
 from app.ziza_chat.history_store.summary import render_transcript
+from app.ziza_chat.history_store.transcript import TranscriptTurn
 from app.ziza_chat.history_store.trimming import turns_to_drop
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,20 @@ async def load_history(session_id: str) -> list[ModelMessage]:
     if not is_db_configured():
         return []
     return await get_history_store().load(session_id)
+
+
+# A demo session expires on its own TTL, so this bounds the response rather
+# than the conversation: far beyond any real visit, and short of a reply nobody
+# could scroll.
+MAX_TRANSCRIPT_TURNS = 200
+
+
+async def load_transcript(session_id: str) -> list[TranscriptTurn]:
+    if not is_db_configured():
+        return []
+    return await get_history_store().load_transcript(
+        session_id, MAX_TRANSCRIPT_TURNS
+    )
 
 
 async def append_turn(session_id: str, messages: Sequence[ModelMessage]) -> None:

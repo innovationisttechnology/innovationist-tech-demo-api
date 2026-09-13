@@ -11,6 +11,7 @@ from app.ziza_chat.hitl.service import UnknownDeferredCallError
 from app.ziza_chat.knowledge_base import clear_knowledge
 from app.ziza_chat.schemas import (
     ApprovalDecisionRequest,
+    ChatHistoryResponse,
     ChatRequest,
     ChatResponse,
     KnowledgeClearResponse,
@@ -44,6 +45,12 @@ async def chat_stream_endpoint(body: ChatRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/chat/{session_id}/history", response_model=ChatHistoryResponse)
+async def chat_history_endpoint(session_id: str) -> ChatHistoryResponse:
+    """The conversation so far, for rebuilding it after a reload."""
+    return await service.chat_history(session_id)
 
 
 @router.post("/chat/approval", response_model=ChatResponse)

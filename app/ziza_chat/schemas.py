@@ -93,6 +93,18 @@ class StarterQuestionsResponse(BaseModel):
     suggestions: list[Suggestion] = Field(default_factory=list)
 
 
+class TranscriptTurnRead(BaseModel):
+    id: str
+    role: str
+    text: str
+    at: datetime
+
+
+class ChatHistoryResponse(BaseModel):
+    session_id: str
+    turns: list[TranscriptTurnRead] = Field(default_factory=list)
+
+
 class SourceKind(str, Enum):
     FILE = "file"
     URL = "url"

@@ -21,6 +21,7 @@ from app.ziza_chat.history_store.repair import (
     resolved_tool_call_ids,
 )
 from app.ziza_chat.history_store.summary import build_summary_turn
+from app.ziza_chat.history_store.transcript import TranscriptTurn, to_transcript
 from app.ziza_chat.history_store.trimming import turns_to_drop
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,28 @@ class MongoHistoryStore:
                 deserialize_turns([turn.messages for turn in turns])
             )
         )
+
+    @staticmethod
+    async def load_transcript(session_id: str, limit: int) -> list[TranscriptTurn]:
+        """The whole conversation as the visitor saw it, oldest first.
+
+        Every stored turn, not the window the model is replayed — trimming
+        exists to bound a prompt, and a visitor rereading their own
+        conversation should not find the start of it missing.
+        """
+        turns = (
+            await ConversationTurn.find(ConversationTurn.session_id == session_id)
+            .sort("+created_at")
+            .limit(limit)
+            .to_list()
+        )
+        return [
+            transcript_turn
+            for turn in turns
+            for transcript_turn in to_transcript(
+                deserialize_turns([turn.messages]), turn.created_at
+            )
+        ]
 
     @staticmethod
     async def load_turn_range(

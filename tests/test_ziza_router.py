@@ -26,6 +26,7 @@ DB_GATED_REQUESTS = [
      {"json": {"session_id": "s", "message": "hi"}}),
     ("post", "/api/ziza/chat/stream", "/api/ziza/chat/stream",
      {"json": {"session_id": "s", "message": "hi"}}),
+    ("get", "/api/ziza/chat/s/history", "/api/ziza/chat/{session_id}/history", {}),
     ("post", "/api/ziza/chat/approval", "/api/ziza/chat/approval",
      {"json": {"session_id": "s", "tool_call_id": "c", "approved": True}}),
     ("post", "/api/ziza/chat/links", "/api/ziza/chat/links",

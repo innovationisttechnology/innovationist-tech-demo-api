@@ -47,6 +47,7 @@ from app.ziza_chat.history_store.repair import last_visitor_message
 from app.ziza_chat.history_store.service import (
     append_turn,
     load_history,
+    load_transcript,
     record_refusal,
 )
 from app.ziza_chat.history_store.store import deserialize_turns
@@ -68,6 +69,7 @@ from app.ziza_chat.hitl.service import (
 from app.ziza_chat.page_links import load_page_links
 from app.ziza_chat.schemas import (
     ApprovalDecisionRequest,
+    ChatHistoryResponse,
     ChatRequest,
     ChatResponse,
     ChatStreamEvent,
@@ -80,6 +82,7 @@ from app.ziza_chat.schemas import (
     StarterQuestionsResponse,
     Suggestion,
     SuggestionKind,
+    TranscriptTurnRead,
 )
 from app.ziza_chat.starter_questions import (
     StoredQuestion,
@@ -955,6 +958,27 @@ def source_kind(document: str) -> SourceKind:
         SourceKind.URL
         if urlparse(document).scheme in ("http", "https")
         else SourceKind.FILE
+    )
+
+
+async def chat_history(session_id: str) -> ChatHistoryResponse:
+    """The conversation as the visitor saw it, for rebuilding it on reload.
+
+    Ids are positional rather than stored. A turn has no identity of its own —
+    the transcript is a list of messages, not rows — and the client only needs
+    something stable to key a list on.
+    """
+    return ChatHistoryResponse(
+        session_id=session_id,
+        turns=[
+            TranscriptTurnRead(
+                id=f"{index}",
+                role=turn.role,
+                text=turn.text,
+                at=turn.at,
+            )
+            for index, turn in enumerate(await load_transcript(session_id))
+        ],
     )
 
 
