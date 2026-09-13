@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import PurePosixPath
 from typing import AsyncIterator, Sequence
 from urllib.parse import urlparse
@@ -45,6 +46,7 @@ from app.ziza_chat.document_loaders.web import (
 )
 from app.ziza_chat.history_store.repair import last_visitor_message
 from app.ziza_chat.history_store.service import (
+    DEFAULT_TRANSCRIPT_PAGE,
     append_turn,
     load_history,
     load_transcript,
@@ -961,24 +963,28 @@ def source_kind(document: str) -> SourceKind:
     )
 
 
-async def chat_history(session_id: str) -> ChatHistoryResponse:
-    """The conversation as the visitor saw it, for rebuilding it on reload.
+async def chat_history(
+    session_id: str,
+    limit: int = DEFAULT_TRANSCRIPT_PAGE,
+    before: datetime | None = None,
+) -> ChatHistoryResponse:
+    """A page of the conversation as the visitor saw it.
 
-    Ids are positional rather than stored. A turn has no identity of its own —
-    the transcript is a list of messages, not rows — and the client only needs
-    something stable to key a list on.
+    The newest page by default, because someone rejoining a conversation wants
+    the end of it. Older pages are asked for by passing back the `next_before`
+    of the one already held.
     """
+    page = await load_transcript(session_id, limit, before)
     return ChatHistoryResponse(
         session_id=session_id,
         turns=[
             TranscriptTurnRead(
-                id=f"{index}",
-                role=turn.role,
-                text=turn.text,
-                at=turn.at,
+                id=turn.id, role=turn.role, text=turn.text, at=turn.at
             )
-            for index, turn in enumerate(await load_transcript(session_id))
+            for turn in page.turns
         ],
+        has_more=page.has_more,
+        next_before=page.next_before,
     )
 
 

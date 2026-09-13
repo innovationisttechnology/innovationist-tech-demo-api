@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from functools import lru_cache
 from typing import Any, Sequence
 
@@ -21,7 +22,10 @@ from app.ziza_chat.history_store.repair import (
     resolved_tool_call_ids,
 )
 from app.ziza_chat.history_store.summary import build_summary_turn
-from app.ziza_chat.history_store.transcript import TranscriptTurn, to_transcript
+from app.ziza_chat.history_store.transcript import (
+    TranscriptPage,
+    to_transcript,
+)
 from app.ziza_chat.history_store.trimming import turns_to_drop
 
 logger = logging.getLogger(__name__)
@@ -130,26 +134,36 @@ class MongoHistoryStore:
         )
 
     @staticmethod
-    async def load_transcript(session_id: str, limit: int) -> list[TranscriptTurn]:
-        """The whole conversation as the visitor saw it, oldest first.
+    async def load_transcript(
+        session_id: str, limit: int, before: datetime | None
+    ) -> TranscriptPage:
+        """The most recent page of the conversation, oldest-first within it.
 
-        Every stored turn, not the window the model is replayed — trimming
-        exists to bound a prompt, and a visitor rereading their own
-        conversation should not find the start of it missing.
+        Newest-first from the database so the first request lands on the end of
+        the conversation, which is where a visitor rejoining it wants to be,
+        then reversed for rendering. One extra row is read to learn whether
+        anything older exists without counting the whole session.
         """
-        turns = (
-            await ConversationTurn.find(ConversationTurn.session_id == session_id)
-            .sort("+created_at")
-            .limit(limit)
-            .to_list()
+        query = ConversationTurn.find(ConversationTurn.session_id == session_id)
+        if before is not None:
+            query = query.find(ConversationTurn.created_at < before)
+        newest_first = await query.sort("-created_at").limit(limit + 1).to_list()
+
+        has_more = len(newest_first) > limit
+        page = newest_first[:limit]
+        return TranscriptPage(
+            turns=[
+                transcript_turn
+                for turn in reversed(page)
+                for transcript_turn in to_transcript(
+                    deserialize_turns([turn.messages]),
+                    turn.created_at,
+                    str(turn.id),
+                )
+            ],
+            has_more=has_more,
+            next_before=page[-1].created_at if has_more and page else None,
         )
-        return [
-            transcript_turn
-            for turn in turns
-            for transcript_turn in to_transcript(
-                deserialize_turns([turn.messages]), turn.created_at
-            )
-        ]
 
     @staticmethod
     async def load_turn_range(

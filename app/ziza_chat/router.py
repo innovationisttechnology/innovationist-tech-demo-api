@@ -1,12 +1,17 @@
 import logging
+from datetime import datetime
 from typing import Annotated, AsyncIterator
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.db import RequiresDatabase
 from app.ziza_chat import service
 from app.ziza_chat.document_loaders import UnsupportedDocumentError
+from app.ziza_chat.history_store.service import (
+    DEFAULT_TRANSCRIPT_PAGE,
+    MAX_TRANSCRIPT_PAGE,
+)
 from app.ziza_chat.hitl.service import UnknownDeferredCallError
 from app.ziza_chat.knowledge_base import clear_knowledge
 from app.ziza_chat.schemas import (
@@ -48,9 +53,18 @@ async def chat_stream_endpoint(body: ChatRequest) -> StreamingResponse:
 
 
 @router.get("/chat/{session_id}/history", response_model=ChatHistoryResponse)
-async def chat_history_endpoint(session_id: str) -> ChatHistoryResponse:
-    """The conversation so far, for rebuilding it after a reload."""
-    return await service.chat_history(session_id)
+async def chat_history_endpoint(
+    session_id: str,
+    limit: Annotated[int, Query(ge=1, le=MAX_TRANSCRIPT_PAGE)] = (
+        DEFAULT_TRANSCRIPT_PAGE
+    ),
+    before: Annotated[datetime | None, Query()] = None,
+) -> ChatHistoryResponse:
+    """A page of the conversation, newest first, for rebuilding it on reload.
+
+    Scrolling back means passing the previous response's `next_before`.
+    """
+    return await service.chat_history(session_id, limit, before)
 
 
 @router.post("/chat/approval", response_model=ChatResponse)

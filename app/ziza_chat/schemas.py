@@ -102,7 +102,13 @@ class TranscriptTurnRead(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     session_id: str
+    # Oldest-first within the page, so it renders in reading order. The page
+    # itself is the most recent one unless `before` asked for an older slice.
     turns: list[TranscriptTurnRead] = Field(default_factory=list)
+    has_more: bool = False
+    # Pass back as `before` to fetch what came before this page. Null when the
+    # start of the conversation is already in it.
+    next_before: datetime | None = None
 
 
 class SourceKind(str, Enum):

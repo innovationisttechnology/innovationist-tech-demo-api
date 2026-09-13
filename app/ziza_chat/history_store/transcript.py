@@ -12,8 +12,6 @@ from typing import Literal, Sequence
 
 from pydantic_ai.messages import (
     ModelMessage,
-    ModelRequest,
-    ModelResponse,
     TextPart,
     UserPromptPart,
 )
@@ -26,13 +24,25 @@ from app.ziza_chat.history_store.summary import (
 
 @dataclass(frozen=True)
 class TranscriptTurn:
+    # Derived from the stored turn this came out of, not from its position in
+    # the page: a page of older turns would otherwise reuse the ids of a page
+    # already rendered.
+    id: str
     role: Literal["user", "assistant"]
     text: str
     at: datetime
 
 
+@dataclass(frozen=True)
+class TranscriptPage:
+    turns: list[TranscriptTurn]
+    has_more: bool
+    # The oldest turn in this page. Pass it back to ask for what came before.
+    next_before: datetime | None
+
+
 def to_transcript(
-    messages: Sequence[ModelMessage], at: datetime
+    messages: Sequence[ModelMessage], at: datetime, turn_id: str
 ) -> list[TranscriptTurn]:
     """What the visitor saw, in order.
 
@@ -42,19 +52,20 @@ def to_transcript(
     reads as something the visitor said when it is not.
     """
     turns: list[TranscriptTurn] = []
+
+    def record(role: Literal["user", "assistant"], text: str) -> None:
+        turns.append(
+            TranscriptTurn(
+                id=f"{turn_id}-{len(turns)}", role=role, text=text, at=at
+            )
+        )
+
     for message in messages:
         if is_summary_turn(message) or is_summary_acknowledgement(message):
             continue
-        if isinstance(message, ModelRequest):
-            turns.extend(
-                TranscriptTurn(role="user", text=part.content, at=at)
-                for part in message.parts
-                if isinstance(part, UserPromptPart) and isinstance(part.content, str)
-            )
-        elif isinstance(message, ModelResponse):
-            turns.extend(
-                TranscriptTurn(role="assistant", text=part.content, at=at)
-                for part in message.parts
-                if isinstance(part, TextPart) and part.content.strip()
-            )
+        for part in message.parts:
+            if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                record("user", part.content)
+            elif isinstance(part, TextPart) and part.content.strip():
+                record("assistant", part.content)
     return turns
