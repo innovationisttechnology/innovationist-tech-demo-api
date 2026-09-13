@@ -67,6 +67,21 @@ class ZizaChatSettings(BaseSettings):
     max_images_per_document: int = 20
     max_concurrent_captions: int = 4
 
+    # Writes the opening questions for a document as it is ingested. Off the
+    # chat path entirely, and its cost is paid once per upload rather than per
+    # turn, so it can afford to read a good deal of the text.
+    ziza_starter_question_model: str = "anthropic:claude-haiku-4-5"
+
+    # Writes the candidate follow-up questions after an answer lands. Off the
+    # request path's critical section, but one call per answered turn, so it
+    # stays on the cheap model.
+    ziza_followup_model: str = "anthropic:claude-haiku-4-5"
+
+    # Picks at most one candidate, or none. Deliberately a different provider
+    # from the writer: a model grading questions it just wrote is reluctant to
+    # reject them all, and rejecting is the point.
+    ziza_suggestion_grader_model: str = "openai:gpt-5.4-mini"
+
     # Optional Tavily key for the web_search tool; when unset the tool is a stub.
     tavily_api_key: str | None = None
 

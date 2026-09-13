@@ -1,21 +1,29 @@
 import logging
+from datetime import datetime
 from typing import Annotated, AsyncIterator
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.db import RequiresDatabase
 from app.ziza_chat import service
 from app.ziza_chat.document_loaders import UnsupportedDocumentError
+from app.ziza_chat.history_store.service import (
+    DEFAULT_TRANSCRIPT_PAGE,
+    MAX_TRANSCRIPT_PAGE,
+)
 from app.ziza_chat.hitl.service import UnknownDeferredCallError
 from app.ziza_chat.knowledge_base import clear_knowledge
 from app.ziza_chat.schemas import (
     ApprovalDecisionRequest,
+    ChatHistoryResponse,
     ChatRequest,
     ChatResponse,
     KnowledgeClearResponse,
     KnowledgeIngestResponse,
+    KnowledgeSourcesResponse,
     LinkSelectionRequest,
+    StarterQuestionsResponse,
 )
 from app.ziza_chat.utils import format_sse
 
@@ -42,6 +50,21 @@ async def chat_stream_endpoint(body: ChatRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.get("/chat/{session_id}/history", response_model=ChatHistoryResponse)
+async def chat_history_endpoint(
+    session_id: str,
+    limit: Annotated[int, Query(ge=1, le=MAX_TRANSCRIPT_PAGE)] = (
+        DEFAULT_TRANSCRIPT_PAGE
+    ),
+    before: Annotated[datetime | None, Query()] = None,
+) -> ChatHistoryResponse:
+    """A page of the conversation, newest first, for rebuilding it on reload.
+
+    Scrolling back means passing the previous response's `next_before`.
+    """
+    return await service.chat_history(session_id, limit, before)
 
 
 @router.post("/chat/approval", response_model=ChatResponse)
@@ -94,6 +117,24 @@ async def ingest_file_endpoint(
         )
     except UnsupportedDocumentError as unsupported:
         raise HTTPException(status_code=415, detail=str(unsupported)) from unsupported
+
+
+@router.get(
+    "/knowledge/{session_id}/suggestions", response_model=StarterQuestionsResponse
+)
+async def starter_questions_endpoint(session_id: str) -> StarterQuestionsResponse:
+    """The opening questions for the most recently added document.
+
+    Read back rather than only returned at ingest, so a visitor who uploads and
+    then reloads before asking anything still has somewhere to start.
+    """
+    return await service.latest_starter_questions(session_id)
+
+
+@router.get("/knowledge/{session_id}", response_model=KnowledgeSourcesResponse)
+async def list_sources_endpoint(session_id: str) -> KnowledgeSourcesResponse:
+    """Everything this session has added, for rebuilding the panel on reload."""
+    return await service.list_sources(session_id)
 
 
 @router.delete("/knowledge/{session_id}", response_model=KnowledgeClearResponse)

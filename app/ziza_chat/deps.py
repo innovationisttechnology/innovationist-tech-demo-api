@@ -8,6 +8,7 @@ class SearchOutcome:
     query: str
     matches: int
     best_score: float | None
+    passages: list[str] = field(default_factory=list)
 
 
 @dataclass

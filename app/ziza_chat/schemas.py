@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import Enum
 from typing import Any
 
@@ -12,7 +13,10 @@ class ChatRequest(BaseModel):
 
 
 class SuggestionKind(str, Enum):
+    # Mutually exclusive by trigger: a turn either retrieved something or it
+    # did not, so at most one kind is ever offered at a time.
     ADD_PAGE = "add_page"
+    ASK = "ask"
 
 
 class Suggestion(BaseModel):
@@ -20,8 +24,9 @@ class Suggestion(BaseModel):
 
     Not a deferred call: the run completed, the answer stands, and ignoring
     this costs nothing. Acting on one means sending `message` as an ordinary
-    chat message, so every kind resolves the same way and a page still enters
-    the knowledge base through the one path that asks before indexing.
+    chat message, so every kind resolves the same way — a page still enters the
+    knowledge base through the one path that asks before indexing, and a
+    follow-up question is just a question.
     """
 
     kind: SuggestionKind
@@ -76,6 +81,53 @@ class KnowledgeIngestResponse(BaseModel):
     documents_allowed: int = 0
     images_failed: int = 0
     searchable: bool
+    # Opening questions for the document just added, so a visitor who has not
+    # read it has somewhere to start. At most three, and empty when the text
+    # holds nothing specific enough to ask about.
+    suggestions: list[Suggestion] = Field(default_factory=list)
+
+
+class StarterQuestionsResponse(BaseModel):
+    session_id: str
+    document: str | None = None
+    suggestions: list[Suggestion] = Field(default_factory=list)
+
+
+class TranscriptTurnRead(BaseModel):
+    id: str
+    role: str
+    text: str
+    at: datetime
+
+
+class ChatHistoryResponse(BaseModel):
+    session_id: str
+    # Oldest-first within the page, so it renders in reading order. The page
+    # itself is the most recent one unless `before` asked for an older slice.
+    turns: list[TranscriptTurnRead] = Field(default_factory=list)
+    has_more: bool = False
+    # Pass back as `before` to fetch what came before this page. Null when the
+    # start of the conversation is already in it.
+    next_before: datetime | None = None
+
+
+class SourceKind(str, Enum):
+    FILE = "file"
+    URL = "url"
+
+
+class KnowledgeSourceRead(BaseModel):
+    document: str
+    kind: SourceKind
+    chunks: int
+    added_at: datetime
+
+
+class KnowledgeSourcesResponse(BaseModel):
+    session_id: str
+    sources: list[KnowledgeSourceRead] = Field(default_factory=list)
+    documents_used: int = 0
+    documents_allowed: int = 0
 
 
 class KnowledgeClearResponse(BaseModel):

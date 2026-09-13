@@ -52,6 +52,7 @@ async def search_knowledge_base(context: RunContext[ChatDeps], query: str) -> st
             query=query,
             matches=len(retrieved),
             best_score=retrieved[0].score if retrieved else None,
+            passages=[chunk.text for chunk in retrieved],
         )
     )
     return format_retrieved_chunks(query, retrieved)

@@ -3,6 +3,7 @@ import asyncio
 import hashlib
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from functools import lru_cache
 from math import sqrt
 from typing import Any, Mapping, Protocol, Sequence
@@ -99,6 +100,13 @@ class _ChunkIdView(BaseModel):
     id: PydanticObjectId = Field(alias="_id")
 
 
+@dataclass(frozen=True)
+class StoredDocument:
+    document: str
+    chunks: int
+    added_at: datetime
+
+
 class MongoVectorStore:
     def __init__(self, embedder: Embedder) -> None:
         self._embedder = embedder
@@ -115,6 +123,34 @@ class MongoVectorStore:
         collection = KnowledgeChunk.get_pymongo_collection()
         names = await collection.distinct("document", {"session_id": session_id})
         return sorted(str(name) for name in names if name)
+
+    async def summarize_documents(self, session_id: str) -> list[StoredDocument]:
+        """What this session holds, one row per document.
+
+        Grouped in the database rather than by reading the chunks back: a
+        session's chunks carry their embeddings, and the caller wants a handful
+        of names and counts.
+        """
+        collection = KnowledgeChunk.get_pymongo_collection()
+        pipeline: list[Mapping[str, Any]] = [
+            {"$match": {"session_id": session_id, "document": {"$ne": ""}}},
+            {
+                "$group": {
+                    "_id": "$document",
+                    "chunks": {"$sum": 1},
+                    "added_at": {"$min": "$created_at"},
+                }
+            },
+            {"$sort": {"added_at": 1}},
+        ]
+        return [
+            StoredDocument(
+                document=str(row["_id"]),
+                chunks=int(row["chunks"]),
+                added_at=row["added_at"],
+            )
+            async for row in await collection.aggregate(pipeline)
+        ]
 
     async def add_sections(
         self, session_id: str, sections: Sequence[DocumentSection]

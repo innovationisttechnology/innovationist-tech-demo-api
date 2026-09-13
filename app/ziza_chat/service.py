@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import PurePosixPath
 from typing import AsyncIterator, Sequence
 from urllib.parse import urlparse
@@ -17,8 +18,13 @@ from app.ziza_chat.agents.classifier import (
     build_classifier_prompt,
     get_classifier_agent,
 )
+from app.ziza_chat.agents.followups import choose_followup, propose_followups
 from app.ziza_chat.agents.outputs import ClassifyResult, Scope
 from app.ziza_chat.agents.page_summary import summarize_page
+from app.ziza_chat.agents.starter_questions import (
+    keep_answered,
+    propose_starter_questions,
+)
 from app.ziza_chat.agents.vision import describe_image
 from app.ziza_chat.caption_cache import (
     carries_no_information,
@@ -40,8 +46,10 @@ from app.ziza_chat.document_loaders.web import (
 )
 from app.ziza_chat.history_store.repair import last_visitor_message
 from app.ziza_chat.history_store.service import (
+    DEFAULT_TRANSCRIPT_PAGE,
     append_turn,
     load_history,
+    load_transcript,
     record_refusal,
 )
 from app.ziza_chat.history_store.store import deserialize_turns
@@ -63,14 +71,27 @@ from app.ziza_chat.hitl.service import (
 from app.ziza_chat.page_links import load_page_links
 from app.ziza_chat.schemas import (
     ApprovalDecisionRequest,
+    ChatHistoryResponse,
     ChatRequest,
     ChatResponse,
     ChatStreamEvent,
     KnowledgeIngestResponse,
+    KnowledgeSourceRead,
+    KnowledgeSourcesResponse,
     LinkSelectionRequest,
     PendingCallRead,
+    SourceKind,
+    StarterQuestionsResponse,
     Suggestion,
     SuggestionKind,
+    TranscriptTurnRead,
+)
+from app.ziza_chat.starter_questions import (
+    StoredQuestion,
+    load_starters,
+    mark_conversation_started,
+    starters_are_wanted,
+    store_starter_questions,
 )
 from app.ziza_chat.tool_logging import log_step, log_tool_events
 from app.ziza_chat.vector_store.store import (
@@ -339,6 +360,80 @@ async def suggest_pages(session_id: str, documents: Sequence[str]) -> list[Sugge
     return suggestions[: min(MAX_SUGGESTED_PAGES, slots_left)]
 
 
+def answerable_passages(deps: ChatDeps) -> list[str]:
+    return [passage for search in deps.searches for passage in search.passages]
+
+
+def retrieval_succeeded(deps: ChatDeps) -> bool:
+    """True when the agent searched and something came back.
+
+    The mirror of retrieval_was_weak, and of what it offers: more material is
+    worth proposing where the knowledge base fell short, a follow-up question
+    where it has already proved it can answer.
+    """
+    return any(search.matches > 0 for search in deps.searches)
+
+
+async def answerable(session_id: str, question: str) -> bool:
+    store = get_vector_store() if is_db_configured() else None
+    if store is None:
+        return False
+    return bool(
+        await store.search(session_id, question, limit=1, min_score=GATE_MIN_SCORE)
+    )
+
+
+async def keep_answerable(session_id: str, candidates: Sequence[str]) -> list[str]:
+    """Drop candidates the scope gate would refuse if the visitor clicked them.
+
+    Suggesting a question and then declining to answer it is worse than
+    suggesting nothing. The gate searches the classifier's shortened query
+    rather than the whole question, so this is a close proxy for it rather than
+    the identical check — but it is a local embedding either way, so the cost
+    is a few vector searches rather than a model call.
+    """
+    verdicts = await asyncio.gather(
+        *(answerable(session_id, candidate) for candidate in candidates)
+    )
+    return [
+        candidate
+        for candidate, is_answerable in zip(candidates, verdicts, strict=True)
+        if is_answerable
+    ]
+
+
+async def suggest_followup(
+    session_id: str, question: str, answer: str, deps: ChatDeps
+) -> list[Suggestion]:
+    """At most one question worth asking next, or nothing.
+
+    Three chances to say no, cheapest first: the writer may return no
+    candidates, retrieval may reject every one, and the grader may judge the
+    survivors not worth showing. A suggestion that appears after every answer
+    is one nobody reads.
+    """
+    if not retrieval_succeeded(deps):
+        return []
+    try:
+        candidates = await propose_followups(
+            question, answer, answerable_passages(deps)
+        )
+        grounded = await keep_answerable(session_id, candidates)
+        chosen = await choose_followup(question, answer, grounded)
+    except Exception as failure:
+        # A suggestion is a nicety; the answer has already been given.
+        logger.warning("Could not suggest a follow-up: %s", failure)
+        return []
+    log_step(
+        session_id,
+        "followup",
+        f"{len(candidates)} written, {len(grounded)} answerable, chosen={chosen!r}",
+    )
+    if chosen is None:
+        return []
+    return [Suggestion(kind=SuggestionKind.ASK, label=chosen, message=chosen)]
+
+
 APPROVAL_FALLBACK_PROMPT = "That needs your confirmation before I can do it."
 
 CALL_FALLBACK_PROMPT = "That needs something from you before I can continue."
@@ -485,8 +580,19 @@ async def prepare_turn(request: ChatRequest) -> RefusedTurn | ReadyTurn:
     return ReadyTurn(intent=intent, history=history, deps=deps)
 
 
+async def retire_starters(session_id: str) -> None:
+    """The offer ends the moment the visitor asks anything.
+
+    Including a message the gate goes on to refuse: they have engaged, which is
+    all the opening questions were there to prompt.
+    """
+    if is_db_configured():
+        await mark_conversation_started(session_id)
+
+
 async def chat(request: ChatRequest) -> ChatResponse:
     log_step(request.session_id, "chat", f"buffered {request.message!r}")
+    await retire_starters(request.session_id)
     prepared = await prepare_turn(request)
     if isinstance(prepared, RefusedTurn):
         return ChatResponse(
@@ -508,17 +614,29 @@ async def chat(request: ChatRequest) -> ChatResponse:
     answered = await handle_output(
         request.session_id, prepared.intent, result.output, result.new_messages()
     )
-    # A paused run is already asking about these same pages; adding the passive
-    # offer on top prompts twice for one decision.
-    if not answered.pending_calls and retrieval_was_weak(prepared.deps):
-        answered.suggestions = await offer_more_pages(
-            request.session_id, prepared.deps.documents, "retrieval came back empty"
-        )
+    # A paused run is already asking about these same pages; adding a passive
+    # offer on top prompts twice for one decision. The two remaining branches
+    # cannot both fire: a turn either retrieved something or it did not.
+    if not answered.pending_calls:
+        if retrieval_was_weak(prepared.deps):
+            answered.suggestions = await offer_more_pages(
+                request.session_id,
+                prepared.deps.documents,
+                "retrieval came back empty",
+            )
+        else:
+            answered.suggestions = await suggest_followup(
+                request.session_id,
+                request.message,
+                answered.response,
+                prepared.deps,
+            )
     return answered
 
 
 async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatStreamEvent]:
     log_step(request.session_id, "chat", f"streaming {request.message!r}")
+    await retire_starters(request.session_id)
     prepared = await prepare_turn(request)
     if isinstance(prepared, RefusedTurn):
         yield ChatStreamEvent(type="chat.chunk", chunk=prepared.refusal)
@@ -559,16 +677,21 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatStreamEvent]:
                 request.session_id, "answered", f"streamed {len(streamed)} chars"
             )
     if deferred is None:
-        if retrieval_was_weak(prepared.deps):
-            weak_suggestions = await offer_more_pages(
+        # After the stream closes, so the visitor is already reading while the
+        # follow-up's two model calls run and they cost no perceived latency.
+        offered = (
+            await offer_more_pages(
                 request.session_id,
                 prepared.deps.documents,
                 "retrieval came back empty",
             )
-            if weak_suggestions:
-                yield ChatStreamEvent(
-                    type="chat.suggestions", suggestions=weak_suggestions
-                )
+            if retrieval_was_weak(prepared.deps)
+            else await suggest_followup(
+                request.session_id, request.message, streamed, prepared.deps
+            )
+        )
+        if offered:
+            yield ChatStreamEvent(type="chat.suggestions", suggestions=offered)
         return
     parked = await handle_pause(
         request.session_id, prepared.intent, deferred, paused_messages
@@ -830,6 +953,128 @@ async def caption_images(
     return sections, failures
 
 
+def source_kind(document: str) -> SourceKind:
+    # A URL-ingested document is identified by the URL itself, and a file by
+    # its filename, so the name is the only thing that distinguishes them.
+    return (
+        SourceKind.URL
+        if urlparse(document).scheme in ("http", "https")
+        else SourceKind.FILE
+    )
+
+
+async def chat_history(
+    session_id: str,
+    limit: int = DEFAULT_TRANSCRIPT_PAGE,
+    before: datetime | None = None,
+) -> ChatHistoryResponse:
+    """A page of the conversation as the visitor saw it.
+
+    The newest page by default, because someone rejoining a conversation wants
+    the end of it. Older pages are asked for by passing back the `next_before`
+    of the one already held.
+    """
+    page = await load_transcript(session_id, limit, before)
+    return ChatHistoryResponse(
+        session_id=session_id,
+        turns=[
+            TranscriptTurnRead(
+                id=turn.id, role=turn.role, text=turn.text, at=turn.at
+            )
+            for turn in page.turns
+        ],
+        has_more=page.has_more,
+        next_before=page.next_before,
+    )
+
+
+async def list_sources(session_id: str) -> KnowledgeSourcesResponse:
+    """What the session holds, so a reload can rebuild the panel.
+
+    Read from the chunks rather than a separate record, because the chunks are
+    what the visitor's questions are actually answered from — a source listed
+    here is one the demo can genuinely use.
+    """
+    if not is_db_configured():
+        return KnowledgeSourcesResponse(session_id=session_id)
+    stored = await get_vector_store().summarize_documents(session_id)
+    return KnowledgeSourcesResponse(
+        session_id=session_id,
+        sources=[
+            KnowledgeSourceRead(
+                document=document.document,
+                kind=source_kind(document.document),
+                chunks=document.chunks,
+                added_at=document.added_at,
+            )
+            for document in stored
+        ],
+        documents_used=len(stored),
+        documents_allowed=ziza_settings.max_documents_per_session,
+    )
+
+
+async def starter_questions(
+    session_id: str, document: str, text: str
+) -> list[Suggestion]:
+    """Opening questions for a document that was just added, or none.
+
+    Offered once per session and only before the visitor has asked anything.
+    Someone already in conversation has found their own way in, so a later
+    upload writes nothing and costs no model call.
+
+    Filtered twice, because the two filters catch different things. Retrieval
+    proves the chunked and embedded copy holds something close to the question,
+    which the raw text alone does not guarantee. A grader then reads the
+    document and decides whether it *answers* the question — retrieval cannot,
+    since a question quoted in a call script is the closest possible match to
+    itself and the one thing the script cannot answer.
+
+    Generation failing costs the questions and nothing else; the document is
+    already indexed by this point.
+    """
+    if not is_db_configured() or not await starters_are_wanted(session_id):
+        return []
+    try:
+        written = await propose_starter_questions(document, text)
+        retrievable = await keep_answerable(session_id, written)
+        grounded = await keep_answered(document, text, retrievable)
+    except Exception as failure:
+        logger.warning("Could not write starter questions for %s: %s", document, failure)
+        return []
+    log_step(
+        session_id,
+        "starters",
+        f"{document}: {len(written)} written, {len(retrievable)} retrievable, "
+        f"{len(grounded)} answered",
+    )
+    await store_starter_questions(
+        session_id,
+        document,
+        [StoredQuestion(label=question, message=question) for question in grounded],
+    )
+    return [
+        Suggestion(kind=SuggestionKind.ASK, label=question, message=question)
+        for question in grounded
+    ]
+
+
+async def latest_starter_questions(session_id: str) -> StarterQuestionsResponse:
+    stored = await load_starters(session_id)
+    if stored is None or stored.conversation_started:
+        return StarterQuestionsResponse(session_id=session_id)
+    return StarterQuestionsResponse(
+        session_id=session_id,
+        document=stored.document,
+        suggestions=[
+            Suggestion(
+                kind=SuggestionKind.ASK, label=question.label, message=question.message
+            )
+            for question in stored.questions
+        ],
+    )
+
+
 async def ingest_file(
     session_id: str,
     filename: str,
@@ -886,6 +1131,11 @@ async def ingest_file(
     return KnowledgeIngestResponse(
         session_id=session_id,
         source=filename,
+        suggestions=await starter_questions(
+            session_id,
+            document_name,
+            "\n\n".join(section.text for section in sections),
+        ),
         chunks_ingested=chunk_count,
         images_described=len(image_sections),
         images_failed=images_failed,
@@ -955,12 +1205,10 @@ async def ingest_url(session_id: str, url: str) -> KnowledgeIngestResponse:
     return KnowledgeIngestResponse(
         session_id=session_id,
         source=source,
+        suggestions=await starter_questions(session_id, url, text),
         chunks_ingested=chunk_count,
         pages_summarised=summarised,
         searchable=searchable,
         documents_used=await store.count_documents(session_id),
         documents_allowed=ziza_settings.max_documents_per_session,
     )
-
-
-

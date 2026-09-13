@@ -30,6 +30,19 @@ def is_summary_turn(message: ModelMessage) -> bool:
     )
 
 
+def is_summary_acknowledgement(message: ModelMessage) -> bool:
+    """The reply half of a summary turn.
+
+    Its request half is caught by is_summary_turn; this one reads as an
+    ordinary thing the assistant said, and would show up in a visitor's
+    transcript as a line nobody ever saw.
+    """
+    return isinstance(message, ModelResponse) and any(
+        isinstance(part, TextPart) and part.content == SUMMARY_ACKNOWLEDGEMENT
+        for part in message.parts
+    )
+
+
 def render_transcript(messages: Sequence[ModelMessage]) -> str:
     lines: list[str] = []
     for message in messages:
