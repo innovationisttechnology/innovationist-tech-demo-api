@@ -71,7 +71,9 @@ class TestOutOfScope:
     ) -> None:
         store = install_store(monkeypatch, ["handbook.txt"], [match()])
         refusal = await service.resolve_scope(
-            "session-1", classification(Scope.OUT_OF_SCOPE, needs_rag=False), VISITOR_MESSAGE
+            "session-1",
+            classification(Scope.OUT_OF_SCOPE, needs_rag=False),
+            VISITOR_MESSAGE,
         )
         assert refusal is not None
         assert "only answer from the documents" in refusal
@@ -84,7 +86,9 @@ class TestOutOfScope:
     ) -> None:
         install_store(monkeypatch, ["handbook.txt", "q3.pdf"])
         refusal = await service.resolve_scope(
-            "session-1", classification(Scope.OUT_OF_SCOPE, needs_rag=False), VISITOR_MESSAGE
+            "session-1",
+            classification(Scope.OUT_OF_SCOPE, needs_rag=False),
+            VISITOR_MESSAGE,
         )
         assert refusal is not None
         assert "handbook.txt" in refusal and "q3.pdf" in refusal
@@ -95,7 +99,9 @@ class TestOutOfScope:
     ) -> None:
         install_store(monkeypatch, [])
         refusal = await service.resolve_scope(
-            "session-1", classification(Scope.OUT_OF_SCOPE, needs_rag=False), VISITOR_MESSAGE
+            "session-1",
+            classification(Scope.OUT_OF_SCOPE, needs_rag=False),
+            VISITOR_MESSAGE,
         )
         assert refusal is not None
         assert "aren't any yet" in refusal
@@ -124,7 +130,9 @@ class TestAssistantScope:
     ) -> None:
         install_store(monkeypatch, [])
         refusal = await service.resolve_scope(
-            "session-1", classification(Scope.ASSISTANT, needs_rag=False), VISITOR_MESSAGE
+            "session-1",
+            classification(Scope.ASSISTANT, needs_rag=False),
+            VISITOR_MESSAGE,
         )
         assert refusal is None
 
@@ -136,7 +144,9 @@ class TestKnowledgeBaseScope:
     ) -> None:
         install_store(monkeypatch, ["handbook.txt"], [match()])
         refusal = await service.resolve_scope(
-            "session-1", classification(Scope.KNOWLEDGE_BASE, "release approval"), VISITOR_MESSAGE
+            "session-1",
+            classification(Scope.KNOWLEDGE_BASE, "release approval"),
+            VISITOR_MESSAGE,
         )
         assert refusal is None
 
@@ -148,7 +158,9 @@ class TestKnowledgeBaseScope:
         # agent must not get a chance to answer it from memory.
         install_store(monkeypatch, ["handbook.txt"], [])
         refusal = await service.resolve_scope(
-            "session-1", classification(Scope.KNOWLEDGE_BASE, "photosynthesis"), VISITOR_MESSAGE
+            "session-1",
+            classification(Scope.KNOWLEDGE_BASE, "photosynthesis"),
+            VISITOR_MESSAGE,
         )
         assert refusal is not None
         assert "handbook.txt" in refusal
@@ -159,7 +171,9 @@ class TestKnowledgeBaseScope:
     ) -> None:
         store = install_store(monkeypatch, ["handbook.txt"], [match()])
         await service.resolve_scope(
-            "session-1", classification(Scope.KNOWLEDGE_BASE, "Sarah Chen"), VISITOR_MESSAGE
+            "session-1",
+            classification(Scope.KNOWLEDGE_BASE, "Sarah Chen"),
+            VISITOR_MESSAGE,
         )
         assert store.searched == ["Sarah Chen"]
 
@@ -171,7 +185,9 @@ class TestKnowledgeBaseScope:
         # search decides, rather than refusing something possibly valid.
         store = install_store(monkeypatch, ["handbook.txt"], [])
         refusal = await service.resolve_scope(
-            "session-1", classification(Scope.KNOWLEDGE_BASE, rag_query=None), VISITOR_MESSAGE
+            "session-1",
+            classification(Scope.KNOWLEDGE_BASE, rag_query=None),
+            VISITOR_MESSAGE,
         )
         assert refusal is None
         assert store.searched == []
@@ -182,7 +198,9 @@ class TestKnowledgeBaseScope:
     ) -> None:
         monkeypatch.setattr(service, "is_db_configured", lambda: False)
         refusal = await service.resolve_scope(
-            "session-1", classification(Scope.KNOWLEDGE_BASE, "anything"), VISITOR_MESSAGE
+            "session-1",
+            classification(Scope.KNOWLEDGE_BASE, "anything"),
+            VISITOR_MESSAGE,
         )
         assert refusal is not None
 
@@ -202,7 +220,9 @@ class TestGateThreshold:
     ) -> None:
         store = install_store(monkeypatch, ["handbook.txt"], [])
         await service.resolve_scope(
-            "session-1", classification(Scope.KNOWLEDGE_BASE, "gravity"), VISITOR_MESSAGE
+            "session-1",
+            classification(Scope.KNOWLEDGE_BASE, "gravity"),
+            VISITOR_MESSAGE,
         )
         # The gate must ask the store for matches at its own threshold rather
         # than accepting whatever the default returns.
@@ -251,7 +271,7 @@ class TestAVagueReference:
     async def test_a_vague_query_is_not_gated_on_retrieval(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """"tell me about this file" reaches the classifier as "file".
+        """ "tell me about this file" reaches the classifier as "file".
 
         No embedding of that matches, however relevant the session's material
         is, so gating on it refuses a visitor their own upload.
@@ -336,13 +356,11 @@ class TestAMentionedPage:
     async def test_a_bare_domain_opens_the_gate(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """"tell me about xyz.com" has no scheme, so the regex alone misses it."""
+        """ "tell me about xyz.com" has no scheme, so the regex alone misses it."""
         store = install_store(monkeypatch, [], [])
         refusal = await service.resolve_scope(
             "session-1",
-            classification(
-                Scope.KNOWLEDGE_BASE, "xyz.com", mentioned_url="xyz.com"
-            ),
+            classification(Scope.KNOWLEDGE_BASE, "xyz.com", mentioned_url="xyz.com"),
             "tell me about xyz.com",
         )
         assert refusal is None

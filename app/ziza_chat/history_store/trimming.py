@@ -19,6 +19,19 @@ def turns_to_drop(total_turns: int) -> int:
     )
 
 
+def turns_to_summarise(stored_turns: int) -> int:
+    """How many stored turns the next reply will not see.
+
+    The message being answered is a turn too, so a conversation sitting exactly
+    on the limit is already over it by the time the model is asked. Budgeting
+    for it here is what keeps the summary covering everything the prompt drops:
+    the loader and the summariser work from this number, and trim_to_recent_turns
+    finds nothing left to cut.
+    """
+    incoming_turn = 1
+    return turns_to_drop(stored_turns + incoming_turn)
+
+
 def turn_start_indexes(messages: Sequence[ModelMessage]) -> list[int]:
     return [
         index

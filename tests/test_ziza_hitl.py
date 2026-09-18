@@ -203,9 +203,7 @@ class TestTheApprovalGate:
         assert raised.value.metadata["documents"] == ["handbook.pdf", "onboarding.md"]
 
     @pytest.mark.anyio
-    async def test_it_runs_once_approved(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_it_runs_once_approved(self, monkeypatch: pytest.MonkeyPatch) -> None:
         cleared: list[str] = []
 
         async def clear(session_id: str) -> int:
@@ -535,7 +533,9 @@ class TestWaitingOnTheRest:
                 session_id="session-1", tool_call_id="call_1", approved=True
             )
         )
-        assert [pending.tool_call_id for pending in response.pending_calls] == ["call_2"]
+        assert [pending.tool_call_id for pending in response.pending_calls] == [
+            "call_2"
+        ]
 
 
 class TestStreamEvents:
@@ -838,9 +838,7 @@ class TestExecutingTheLinkSelection:
 
         async def fake_run(**kwargs: Any) -> Any:
             supplied.append(kwargs["deferred_tool_results"])
-            return SimpleNamespace(
-                output="Indexed the guide.", new_messages=lambda: []
-            )
+            return SimpleNamespace(output="Indexed the guide.", new_messages=lambda: [])
 
         monkeypatch.setattr(service, "ingest_url", fake_ingest)
         monkeypatch.setattr(service, "load_history", no_history)

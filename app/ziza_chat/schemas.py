@@ -32,6 +32,9 @@ class Suggestion(BaseModel):
     kind: SuggestionKind
     label: str
     message: str
+    # A heading shown above the chip, naming where following this would take
+    # the conversation. None where nothing better than a generic kicker exists.
+    category: str | None = None
     url: str | None = None
 
 

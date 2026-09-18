@@ -70,7 +70,8 @@ def _mean_and_stddev(histogram: list[int]) -> tuple[float, float]:
         return 0.0, 0.0
     mean = sum(value * count for value, count in enumerate(histogram)) / total
     variance = (
-        sum(count * (value - mean) ** 2 for value, count in enumerate(histogram)) / total
+        sum(count * (value - mean) ** 2 for value, count in enumerate(histogram))
+        / total
     )
     return mean, variance**0.5
 
@@ -95,7 +96,5 @@ async def store_caption(session_id: str, image_hash: str, caption: str) -> None:
 
 
 async def clear_captions(session_id: str) -> int:
-    result = await CachedCaption.find(
-        CachedCaption.session_id == session_id
-    ).delete()
+    result = await CachedCaption.find(CachedCaption.session_id == session_id).delete()
     return int(result.deleted_count) if result else 0

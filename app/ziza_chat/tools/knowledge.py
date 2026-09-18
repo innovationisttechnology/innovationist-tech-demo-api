@@ -34,7 +34,9 @@ async def clear_knowledge_base(context: RunContext[ChatDeps]) -> str:
     if not context.tool_call_approved:
         documents = await describe_holdings(session_id)
         log_step(
-            session_id, "defer", f"approval needed to clear {len(documents)} document(s)"
+            session_id,
+            "defer",
+            f"approval needed to clear {len(documents)} document(s)",
         )
         raise ApprovalRequired(
             metadata={
@@ -92,9 +94,7 @@ async def add_url_to_knowledge_base(context: RunContext[ChatDeps], url: str) -> 
 
     held = set(context.deps.documents)
     page_already_indexed = url in held
-    found = (
-        extract_links(page.body, page.url) if "html" in page.content_type else []
-    )
+    found = extract_links(page.body, page.url) if "html" in page.content_type else []
     # Stored here rather than at ingest time because this is the only place the
     # page's HTML is read, and a later suggestion must not cost a second fetch.
     await store_page_links(session_id, url, found)

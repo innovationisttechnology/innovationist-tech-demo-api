@@ -63,9 +63,9 @@ class ChoseFromTheCandidates(Evaluator[Candidates, str | None]):
         )
 
 
-def case(name: str, questions: list[str], expected: str | None) -> Case[
-    Candidates, str | None, dict[str, object]
-]:
+def case(
+    name: str, questions: list[str], expected: str | None
+) -> Case[Candidates, str | None, dict[str, object]]:
     return Case(name=name, inputs=Candidates(questions), expected_output=expected)
 
 

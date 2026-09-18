@@ -56,6 +56,7 @@ class ImageDescription(BaseModel):
 def get_vision_agent() -> Agent[None, ImageDescription]:
     return Agent[None, ImageDescription](
         ziza_settings.ziza_vision_model,
+        name="the_art_critic",
         output_type=ImageDescription,
         instructions=VISION_PROMPT,
     )

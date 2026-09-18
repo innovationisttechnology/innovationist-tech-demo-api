@@ -21,8 +21,13 @@ def make_png(width: int = 64, height: int = 64) -> bytes:
     image = Image.new("RGB", (width, height))
     # Noise defeats PNG compression, so the file is big enough to look like
     # content rather than a decorative icon.
-    image.putdata([(x * 7 % 256, y * 13 % 256, (x + y) % 256)
-                   for y in range(height) for x in range(width)])
+    image.putdata(
+        [
+            (x * 7 % 256, y * 13 % 256, (x + y) % 256)
+            for y in range(height)
+            for x in range(width)
+        ]
+    )
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
@@ -269,7 +274,9 @@ class TestCaptionImages:
         return stored
 
     @pytest.mark.anyio
-    async def test_failed_captions_are_skipped_not_fatal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_failed_captions_are_skipped_not_fatal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from app.ziza_chat import service
         from app.ziza_chat.document_loaders import ExtractedImage
 
@@ -286,7 +293,9 @@ class TestCaptionImages:
             ExtractedImage(data=b"bad", media_type="image/png", locator="page 1"),
             ExtractedImage(data=b"good", media_type="image/png", locator="page 2"),
         ]
-        sections, failures = await service.caption_images(images, "report.pdf", "session-1")
+        sections, failures = await service.caption_images(
+            images, "report.pdf", "session-1"
+        )
 
         assert len(sections) == 1
         assert failures == 1
@@ -294,7 +303,9 @@ class TestCaptionImages:
         assert sections[0].source == "report.pdf (page 2, image)"
 
     @pytest.mark.anyio
-    async def test_cached_caption_skips_the_model_entirely(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_cached_caption_skips_the_model_entirely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         from app.ziza_chat import service
         from app.ziza_chat.caption_cache import hash_image
         from app.ziza_chat.document_loaders import ExtractedImage

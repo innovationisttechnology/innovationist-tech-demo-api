@@ -54,7 +54,9 @@ class ConversationSummary(BaseModel):
     def to_prompt_text(self) -> str:
         sections = [self.summary]
         if self.documents_discussed:
-            sections.append(f"Documents discussed: {', '.join(self.documents_discussed)}")
+            sections.append(
+                f"Documents discussed: {', '.join(self.documents_discussed)}"
+            )
         if self.established_facts:
             sections.append(f"Established: {'; '.join(self.established_facts)}")
         if self.open_questions:
@@ -66,6 +68,7 @@ class ConversationSummary(BaseModel):
 def get_conversation_summary_agent() -> Agent[None, ConversationSummary]:
     return Agent[None, ConversationSummary](
         ziza_settings.ziza_summary_model,
+        name="the_minutes_clerk",
         output_type=ConversationSummary,
         instructions=CONVERSATION_SUMMARY_PROMPT,
     )

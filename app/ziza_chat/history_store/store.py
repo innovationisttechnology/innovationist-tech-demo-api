@@ -26,7 +26,7 @@ from app.ziza_chat.history_store.transcript import (
     TranscriptPage,
     to_transcript,
 )
-from app.ziza_chat.history_store.trimming import turns_to_drop
+from app.ziza_chat.history_store.trimming import turns_to_summarise
 
 logger = logging.getLogger(__name__)
 
@@ -179,14 +179,20 @@ class MongoHistoryStore:
         return deserialize_turns([turn.messages for turn in turns])
 
     async def load(self, session_id: str) -> list[ModelMessage]:
-        older_turns_to_skip = turns_to_drop(await self.count_turns(session_id))
-        window = await self.load_turns(session_id, older_turns_to_skip)
-        if not older_turns_to_skip:
-            return window
+        """The conversation as the model should see it before the next reply.
+
+        Turns are only dropped once a summary covers them, and exactly as many
+        as it covers: a window trimmed further than the summary reaches would
+        leave the model answering with a hole it cannot know about.
+        """
+        if not turns_to_summarise(await self.count_turns(session_id)):
+            return await self.load_turns(session_id, 0)
         summary = await self.load_summary(session_id)
         if summary is None:
-            return window
-        return build_summary_turn(summary.summary) + window
+            return await self.load_turns(session_id, 0)
+        return build_summary_turn(summary.summary) + await self.load_turns(
+            session_id, summary.covers_turns
+        )
 
     @staticmethod
     async def append(session_id: str, messages: Sequence[ModelMessage]) -> None:

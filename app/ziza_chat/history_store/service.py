@@ -10,7 +10,7 @@ from app.ziza_chat.agents.conversation_summary import fold_into_summary
 from app.ziza_chat.history_store.store import build_refusal_turn, get_history_store
 from app.ziza_chat.history_store.summary import render_transcript
 from app.ziza_chat.history_store.transcript import TranscriptPage
-from app.ziza_chat.history_store.trimming import turns_to_drop
+from app.ziza_chat.history_store.trimming import turns_to_summarise
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +50,7 @@ async def append_turn(session_id: str, messages: Sequence[ModelMessage]) -> None
     schedule_summary_refresh(session_id)
 
 
-async def record_refusal(
-    session_id: str, visitor_message: str, refusal: str
-) -> None:
+async def record_refusal(session_id: str, visitor_message: str, refusal: str) -> None:
     await append_turn(session_id, build_refusal_turn(visitor_message, refusal))
 
 
@@ -61,9 +59,7 @@ async def clear_history(session_id: str) -> int:
         return 0
     turns_removed = await get_history_store().clear(session_id)
     if turns_removed:
-        logger.info(
-            "cleared %d conversation turn(s) for %s", turns_removed, session_id
-        )
+        logger.info("cleared %d conversation turn(s) for %s", turns_removed, session_id)
     return turns_removed
 
 
@@ -76,7 +72,7 @@ def schedule_summary_refresh(session_id: str) -> None:
 async def refresh_summary(session_id: str) -> None:
     try:
         store = get_history_store()
-        turns_now_summarised = turns_to_drop(await store.count_turns(session_id))
+        turns_now_summarised = turns_to_summarise(await store.count_turns(session_id))
         if not turns_now_summarised:
             return
         existing = await store.load_summary(session_id)

@@ -8,12 +8,20 @@ from typing import AsyncIterator, Sequence
 from urllib.parse import urlparse
 
 import httpx
-from pydantic_ai import DeferredToolRequests
-from pydantic_ai.messages import ModelMessage
+from pydantic_ai import AgentRunResultEvent, DeferredToolRequests
+from pydantic_ai.messages import (
+    AgentStreamEvent,
+    ModelMessage,
+    PartDeltaEvent,
+    PartStartEvent,
+    TextPart,
+    TextPartDelta,
+)
 from pydantic_ai.usage import UsageLimits
 
 from app.core.db.db_config import is_db_configured
-from app.ziza_chat.agents.chat import get_chat_agent
+from app.core.exceptions import SessionLimitError
+from app.ziza_chat.agents.chat import ChatOutput, get_chat_agent
 from app.ziza_chat.agents.classifier import (
     build_classifier_prompt,
     get_classifier_agent,
@@ -93,7 +101,7 @@ from app.ziza_chat.starter_questions import (
     starters_are_wanted,
     store_starter_questions,
 )
-from app.ziza_chat.tool_logging import log_step, log_tool_events
+from app.ziza_chat.tool_logging import log_step, log_tool_event, log_tool_events
 from app.ziza_chat.vector_store.store import (
     MIN_SCORE,
     DocumentSection,
@@ -101,10 +109,6 @@ from app.ziza_chat.vector_store.store import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class SessionLimitError(Exception):
-    pass
 
 
 class UnofferedLinkError(Exception):
@@ -179,7 +183,7 @@ def normalize_url(mentioned: str | None) -> str | None:
     """
     if not mentioned:
         return None
-    candidate = mentioned.strip().strip(".,;:!?\"\'()[]<>")
+    candidate = mentioned.strip().strip(".,;:!?\"'()[]<>")
     if EXPLICIT_URL.fullmatch(candidate):
         return candidate
     if URL_SHAPE.fullmatch(candidate):
@@ -262,9 +266,7 @@ async def resolve_scope(
         )
         return None
 
-    log_step(
-        session_id, "gate", f"searching {query!r} at min_score={GATE_MIN_SCORE}"
-    )
+    log_step(session_id, "gate", f"searching {query!r} at min_score={GATE_MIN_SCORE}")
     matches = await store.search(session_id, query, limit=1, min_score=GATE_MIN_SCORE)
     if not matches:
         log_step(
@@ -273,9 +275,7 @@ async def resolve_scope(
             f"refused — nothing matched {query!r} in {len(documents)} document(s)",
         )
         return refusal_for(documents)
-    log_step(
-        session_id, "gate", f"allowed — best match scored {matches[0].score:.2f}"
-    )
+    log_step(session_id, "gate", f"allowed — best match scored {matches[0].score:.2f}")
     return None
 
 
@@ -314,9 +314,7 @@ def retrieval_was_weak(deps: ChatDeps) -> bool:
     answer text, so "the documents did not cover this" is a fact about
     retrieval and not a guess about prose.
     """
-    return bool(deps.searches) and all(
-        search.matches == 0 for search in deps.searches
-    )
+    return bool(deps.searches) and all(search.matches == 0 for search in deps.searches)
 
 
 async def offer_more_pages(
@@ -418,7 +416,14 @@ async def suggest_followup(
         candidates = await propose_followups(
             question, answer, answerable_passages(deps)
         )
-        grounded = await keep_answerable(session_id, candidates)
+        answerable = set(
+            await keep_answerable(
+                session_id, [candidate.question for candidate in candidates]
+            )
+        )
+        grounded = [
+            candidate for candidate in candidates if candidate.question in answerable
+        ]
         chosen = await choose_followup(question, answer, grounded)
     except Exception as failure:
         # A suggestion is a nicety; the answer has already been given.
@@ -427,11 +432,20 @@ async def suggest_followup(
     log_step(
         session_id,
         "followup",
-        f"{len(candidates)} written, {len(grounded)} answerable, chosen={chosen!r}",
+        f"{len(candidates)} written, {len(grounded)} answerable, "
+        f"chosen={(chosen.question if chosen else None)!r} "
+        f"under {(chosen.category if chosen else None)!r}",
     )
     if chosen is None:
         return []
-    return [Suggestion(kind=SuggestionKind.ASK, label=chosen, message=chosen)]
+    return [
+        Suggestion(
+            kind=SuggestionKind.ASK,
+            label=chosen.question,
+            message=chosen.question,
+            category=chosen.category,
+        )
+    ]
 
 
 APPROVAL_FALLBACK_PROMPT = "That needs your confirmation before I can do it."
@@ -552,9 +566,7 @@ async def prepare_turn(request: ChatRequest) -> RefusedTurn | ReadyTurn:
     if await decline_abandoned(request.session_id):
         log_step(request.session_id, "abandoned", "declined the pause left open")
     history = await load_history(request.session_id)
-    log_step(
-        request.session_id, "history", f"replaying {len(history)} message(s)"
-    )
+    log_step(request.session_id, "history", f"replaying {len(history)} message(s)")
     classification = await classify(
         request.message, last_visitor_message(history), request.session_id
     )
@@ -634,6 +646,14 @@ async def chat(request: ChatRequest) -> ChatResponse:
     return answered
 
 
+def streamed_text(event: AgentStreamEvent) -> str:
+    if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+        return event.part.content
+    if isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+        return event.delta.content_delta
+    return ""
+
+
 async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatStreamEvent]:
     log_step(request.session_id, "chat", f"streaming {request.message!r}")
     await retire_starters(request.session_id)
@@ -649,34 +669,32 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatStreamEvent]:
             )
         return
     log_step(request.session_id, "agent", f"running {ziza_settings.ziza_chat_model}")
-    async with get_chat_agent().run_stream(
+    completed: AgentRunResultEvent[ChatOutput] | None = None
+    streamed = ""
+    async with get_chat_agent().run_stream_events(
         request.message,
         deps=prepared.deps,
         message_history=prepared.history,
-        event_stream_handler=log_tool_events,
         usage_limits=CHAT_USAGE_LIMITS,
-    ) as result:
-        deferred: DeferredToolRequests | None = None
-        streamed = ""
-        async for output in result.stream_output():
-            if isinstance(output, DeferredToolRequests):
-                deferred = output
+    ) as events:
+        async for event in events:
+            if isinstance(event, AgentRunResultEvent):
+                completed = event
                 continue
-            if output.startswith(streamed) and len(output) > len(streamed):
-                yield ChatStreamEvent(
-                    type="chat.chunk", chunk=output[len(streamed) :]
-                )
-                streamed = output
-        # Must stay inside the context manager and after the loop: the result
-        # holds a list the run mutates, and the final message only lands once
-        # the stream has been consumed.
-        paused_messages = list(result.new_messages()) if deferred else []
-        if deferred is None:
-            await append_turn(request.session_id, result.new_messages())
-            log_step(
-                request.session_id, "answered", f"streamed {len(streamed)} chars"
-            )
-    if deferred is None:
+            log_tool_event(request.session_id, event)
+            chunk = streamed_text(event)
+            if chunk:
+                streamed += chunk
+                yield ChatStreamEvent(type="chat.chunk", chunk=chunk)
+
+    if completed is None:
+        log_step(request.session_id, "agent", "the run ended without a result")
+        return
+
+    output = completed.result.output
+    if not isinstance(output, DeferredToolRequests):
+        await append_turn(request.session_id, completed.result.new_messages())
+        log_step(request.session_id, "answered", f"streamed {len(streamed)} chars")
         # After the stream closes, so the visitor is already reading while the
         # follow-up's two model calls run and they cost no perceived latency.
         offered = (
@@ -694,7 +712,10 @@ async def stream_chat(request: ChatRequest) -> AsyncIterator[ChatStreamEvent]:
             yield ChatStreamEvent(type="chat.suggestions", suggestions=offered)
         return
     parked = await handle_pause(
-        request.session_id, prepared.intent, deferred, paused_messages
+        request.session_id,
+        prepared.intent,
+        output,
+        list(completed.result.new_messages()),
     )
     yield ChatStreamEvent(type="chat.chunk", chunk=parked.response)
     for pending in parked.pending_calls:
@@ -784,9 +805,7 @@ class LinkIngestOutcome:
     failed: list[FailedLink]
 
 
-async def ingest_each(
-    session_id: str, urls: Sequence[str]
-) -> LinkIngestOutcome:
+async def ingest_each(session_id: str, urls: Sequence[str]) -> LinkIngestOutcome:
     """Index a batch of pages, keeping the ones that work.
 
     One unreachable link must not lose the rest, so each failure is recorded
@@ -798,9 +817,7 @@ async def ingest_each(
     # already occupies.
     for target in dict.fromkeys(urls):
         try:
-            outcome.indexed.append(
-                await ingest_url(session_id, target)
-            )
+            outcome.indexed.append(await ingest_url(session_id, target))
         except (
             SessionLimitError,
             UnsupportedDocumentError,
@@ -858,9 +875,7 @@ async def ingest_link_selection(
 def offered_links(call: DeferredCall) -> set[str]:
     offered = call.metadata.get("links") or []
     return {
-        str(link["url"])
-        for link in offered
-        if isinstance(link, dict) and "url" in link
+        str(link["url"]) for link in offered if isinstance(link, dict) and "url" in link
     }
 
 
@@ -877,9 +892,7 @@ async def resolve_link_selection(request: LinkSelectionRequest) -> ChatResponse:
     if unoffered:
         # The selection decides what this endpoint fetches, so it is checked
         # against what was offered rather than trusted as URLs to go and read.
-        raise UnofferedLinkError(
-            f"Not offered for this call: {', '.join(unoffered)}."
-        )
+        raise UnofferedLinkError(f"Not offered for this call: {', '.join(unoffered)}.")
     base_url = call.metadata.get("url")
     if not isinstance(base_url, str):
         raise UnofferedLinkError(f"{request.tool_call_id} has no page to index.")
@@ -928,12 +941,12 @@ async def caption_images(
         await store_caption(session_id, image_hash, caption)
         return caption
 
-    describable = [
-        image for image in images if not carries_no_information(image.data)
-    ]
+    describable = [image for image in images if not carries_no_information(image.data)]
     skipped = len(images) - len(describable)
     if skipped:
-        logger.info("skipped %d image(s) in %s with nothing to index", skipped, filename)
+        logger.info(
+            "skipped %d image(s) in %s with nothing to index", skipped, filename
+        )
 
     results = await asyncio.gather(
         *(describe(image) for image in describable), return_exceptions=True
@@ -978,9 +991,7 @@ async def chat_history(
     return ChatHistoryResponse(
         session_id=session_id,
         turns=[
-            TranscriptTurnRead(
-                id=turn.id, role=turn.role, text=turn.text, at=turn.at
-            )
+            TranscriptTurnRead(id=turn.id, role=turn.role, text=turn.text, at=turn.at)
             for turn in page.turns
         ],
         has_more=page.has_more,
@@ -1037,10 +1048,19 @@ async def starter_questions(
         return []
     try:
         written = await propose_starter_questions(document, text)
-        retrievable = await keep_answerable(session_id, written)
+        answerable = set(
+            await keep_answerable(
+                session_id, [candidate.question for candidate in written]
+            )
+        )
+        retrievable = [
+            candidate for candidate in written if candidate.question in answerable
+        ]
         grounded = await keep_answered(document, text, retrievable)
     except Exception as failure:
-        logger.warning("Could not write starter questions for %s: %s", document, failure)
+        logger.warning(
+            "Could not write starter questions for %s: %s", document, failure
+        )
         return []
     log_step(
         session_id,
@@ -1051,11 +1071,23 @@ async def starter_questions(
     await store_starter_questions(
         session_id,
         document,
-        [StoredQuestion(label=question, message=question) for question in grounded],
+        [
+            StoredQuestion(
+                label=candidate.question,
+                message=candidate.question,
+                category=candidate.category,
+            )
+            for candidate in grounded
+        ],
     )
     return [
-        Suggestion(kind=SuggestionKind.ASK, label=question, message=question)
-        for question in grounded
+        Suggestion(
+            kind=SuggestionKind.ASK,
+            label=candidate.question,
+            message=candidate.question,
+            category=candidate.category,
+        )
+        for candidate in grounded
     ]
 
 
@@ -1068,7 +1100,10 @@ async def latest_starter_questions(session_id: str) -> StarterQuestionsResponse:
         document=stored.document,
         suggestions=[
             Suggestion(
-                kind=SuggestionKind.ASK, label=question.label, message=question.message
+                kind=SuggestionKind.ASK,
+                label=question.label,
+                message=question.message,
+                category=question.category,
             )
             for question in stored.questions
         ],

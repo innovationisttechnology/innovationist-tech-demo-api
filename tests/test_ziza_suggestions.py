@@ -6,9 +6,11 @@ is what keeps it from nagging.
 """
 
 from types import SimpleNamespace
-from typing import Any, Sequence
+from typing import Any, AsyncIterator, Sequence
 
 import pytest
+from pydantic_ai import AgentRunResultEvent
+from pydantic_ai.messages import PartStartEvent, TextPart
 
 from app.ziza_chat import service
 from app.ziza_chat.deps import ChatDeps, SearchOutcome
@@ -87,9 +89,7 @@ class TestChoosingWhatToSuggest:
         assert suggestions == []
 
     @pytest.mark.anyio
-    async def test_the_offer_is_capped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_the_offer_is_capped(self, monkeypatch: pytest.MonkeyPatch) -> None:
         install_links(
             monkeypatch, links(*[f"https://example.com/{n}" for n in range(20)])
         )
@@ -164,22 +164,23 @@ def install_turn(
     async def fake_run(*args: Any, **kwargs: Any) -> Any:
         return SimpleNamespace(output="an answer", new_messages=lambda: [])
 
-    class FakeStream:
-        async def stream_output(self) -> Any:
-            yield "an answer"
+    async def streamed_events() -> AsyncIterator[Any]:
+        yield PartStartEvent(index=0, part=TextPart("an answer"))
+        yield AgentRunResultEvent(result=await fake_run())
 
-        def new_messages(self) -> list[Any]:
-            return []
+    class FakeEventStream:
+        def __aiter__(self) -> AsyncIterator[Any]:
+            return streamed_events()
 
-    class FakeStreamContext:
-        async def __aenter__(self) -> FakeStream:
-            return FakeStream()
+    class FakeEventContext:
+        async def __aenter__(self) -> FakeEventStream:
+            return FakeEventStream()
 
         async def __aexit__(self, *exc: Any) -> None:
             return None
 
-    def fake_run_stream(*args: Any, **kwargs: Any) -> FakeStreamContext:
-        return FakeStreamContext()
+    def fake_run_stream_events(*args: Any, **kwargs: Any) -> FakeEventContext:
+        return FakeEventContext()
 
     async def swallow(session_id: str, messages: Any) -> None:
         return None
@@ -189,7 +190,7 @@ def install_turn(
     monkeypatch.setattr(
         service,
         "get_chat_agent",
-        lambda: SimpleNamespace(run=fake_run, run_stream=fake_run_stream),
+        lambda: SimpleNamespace(run=fake_run, run_stream_events=fake_run_stream_events),
     )
 
 
@@ -240,9 +241,7 @@ class TestWhenTheOfferAppears:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         install_turn(monkeypatch, refusal=None)
-        response = await service.chat(
-            ChatRequest(session_id="s", message="hello")
-        )
+        response = await service.chat(ChatRequest(session_id="s", message="hello"))
         assert response.suggestions == []
 
 
@@ -293,9 +292,7 @@ class TestAPausedRunIsAlreadyTheOffer:
             searches=[SearchOutcome(query="links", matches=0, best_score=None)],
         )
 
-        async def park(
-            session_id: str, intent: str, output: Any, messages: Any
-        ) -> Any:
+        async def park(session_id: str, intent: str, output: Any, messages: Any) -> Any:
             return ChatResponse(
                 session_id=session_id,
                 response="Choose which to index.",

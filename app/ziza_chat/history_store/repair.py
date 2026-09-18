@@ -90,15 +90,17 @@ def drop_unresolved_tool_calls(
         kept_parts = [
             part
             for part in message.parts
-            if not (isinstance(part, ToolCallPart) and part.tool_call_id not in resolved)
+            if not (
+                isinstance(part, ToolCallPart) and part.tool_call_id not in resolved
+            )
         ]
         dropped += len(message.parts) - len(kept_parts)
         if not kept_parts:
             continue
         repaired.append(
-            message if len(kept_parts) == len(message.parts) else replace(
-                message, parts=kept_parts
-            )
+            message
+            if len(kept_parts) == len(message.parts)
+            else replace(message, parts=kept_parts)
         )
     if dropped:
         logger.warning(

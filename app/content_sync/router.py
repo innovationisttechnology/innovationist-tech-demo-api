@@ -39,9 +39,7 @@ async def list_flags(session_id: SessionId) -> list[SyncFlagRead]:
 
 
 @router.post("", response_model=SyncFlagRead, status_code=201)
-async def create_flag(
-    session_id: SessionId, payload: SyncFlagCreate
-) -> SyncFlagRead:
+async def create_flag(session_id: SessionId, payload: SyncFlagCreate) -> SyncFlagRead:
     return await service.create_flag(session_id, payload)
 
 

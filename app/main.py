@@ -15,23 +15,15 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from app.content_sync.change_stream import watch_sync_flags
 from app.content_sync.connection_manager import connection_manager
 from app.core.config import settings
 from app.core.db import close_db, init_db, is_db_configured
-from app.core.exceptions import (
-    ErrorResponse,
-    http_exception_handler,
-    unhandled_exception_handler,
-    validation_exception_handler,
-)
+from app.core.exceptions import register_exception_handlers
 from app.routes.routes import api_router
-from app.ziza_chat.service import SessionLimitError
 from app.ziza_chat.vector_store.index import ensure_vector_index
 
 logger = logging.getLogger(__name__)
@@ -72,7 +64,6 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await close_db()
 
 
-
 _expose_api_docs = settings.environment != "production"
 
 app = FastAPI(
@@ -92,19 +83,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def session_limit_handler(request: Request, exc: Exception) -> Response:
-    return JSONResponse(
-        status_code=429,
-        content=ErrorResponse(
-            error="session_limit", message=str(exc), status_code=429
-        ).model_dump(),
-    )
-
-
-app.add_exception_handler(SessionLimitError, session_limit_handler)
-app.add_exception_handler(HTTPException, http_exception_handler)
-app.add_exception_handler(RequestValidationError, validation_exception_handler)
-app.add_exception_handler(Exception, unhandled_exception_handler)
+register_exception_handlers(app)
 
 
 @app.get("/")

@@ -62,7 +62,9 @@ def assert_public_url(url: str) -> None:
         raise UnsafeUrlError("URL has no hostname.")
 
     try:
-        addresses = socket.getaddrinfo(hostname, parsed.port or 0, type=socket.SOCK_STREAM)
+        addresses = socket.getaddrinfo(
+            hostname, parsed.port or 0, type=socket.SOCK_STREAM
+        )
     except socket.gaierror as failure:
         raise UnsafeUrlError(f"Could not resolve {hostname!r}.") from failure
 
@@ -109,10 +111,11 @@ async def fetch_page(url: str) -> FetchedPage:
             body = response.content
             if len(body) > MAX_PAGE_BYTES:
                 raise UnsupportedDocumentError(
-                    f"{current_url} is larger than "
-                    f"{MAX_PAGE_BYTES // (1024 * 1024)}MB."
+                    f"{current_url} is larger than {MAX_PAGE_BYTES // (1024 * 1024)}MB."
                 )
-            content_type = response.headers.get("content-type", "").split(";")[0].strip()
+            content_type = (
+                response.headers.get("content-type", "").split(";")[0].strip()
+            )
             return FetchedPage(
                 url=current_url,
                 title=extract_title(body, content_type),

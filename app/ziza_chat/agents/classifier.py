@@ -148,6 +148,7 @@ def build_classifier_prompt(message: str, previous_message: str | None) -> str:
 def get_classifier_agent() -> Agent[None, ClassifyResult]:
     return Agent[None, ClassifyResult](
         ziza_settings.ziza_classifier_model,
+        name="the_bouncer",
         output_type=ClassifyResult,
         instructions=CLASSIFIER_PROMPT,
         model_settings=ModelSettings(temperature=0, max_tokens=1024),

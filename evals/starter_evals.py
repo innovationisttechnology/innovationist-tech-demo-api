@@ -52,9 +52,7 @@ class Grading:
 
 @dataclass
 class KeptTheRightOnes(Evaluator[Grading, list[str]]):
-    def evaluate(
-        self, ctx: EvaluatorContext[Grading, list[str]]
-    ) -> EvaluationReason:
+    def evaluate(self, ctx: EvaluatorContext[Grading, list[str]]) -> EvaluationReason:
         expected = set(ctx.expected_output or [])
         kept = set(ctx.output or [])
         return EvaluationReason(
@@ -65,9 +63,7 @@ class KeptTheRightOnes(Evaluator[Grading, list[str]]):
 
 @dataclass
 class InventedNothing(Evaluator[Grading, list[str]]):
-    def evaluate(
-        self, ctx: EvaluatorContext[Grading, list[str]]
-    ) -> EvaluationReason:
+    def evaluate(self, ctx: EvaluatorContext[Grading, list[str]]) -> EvaluationReason:
         offered = set(ctx.inputs.candidates)
         stray = sorted(set(ctx.output or []) - offered)
         return EvaluationReason(

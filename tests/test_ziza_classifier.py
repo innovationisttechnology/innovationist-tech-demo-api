@@ -82,6 +82,4 @@ def test_empty_intents_rejected() -> None:
 
 def test_unknown_intent_rejected() -> None:
     with pytest.raises(ValidationError):
-        ClassifyResult.model_validate(
-            {"intents": ["sales pitch"], "needs_rag": False}
-        )
+        ClassifyResult.model_validate({"intents": ["sales pitch"], "needs_rag": False})

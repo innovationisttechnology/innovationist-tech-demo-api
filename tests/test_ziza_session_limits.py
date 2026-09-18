@@ -6,6 +6,7 @@ The store is stubbed so these run without MongoDB; what matters is the decision
 
 import pytest
 
+from app.core.exceptions import SessionLimitError
 from app.ziza_chat import service
 from app.ziza_chat.config import ziza_settings
 
@@ -34,11 +35,12 @@ class TestAssertCapacity:
     async def test_refuses_a_new_document_at_the_limit(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        full = [f"doc{index}.pdf" for index in range(
-            ziza_settings.max_documents_per_session
-        )]
+        full = [
+            f"doc{index}.pdf"
+            for index in range(ziza_settings.max_documents_per_session)
+        ]
         use_documents(monkeypatch, full)
-        with pytest.raises(service.SessionLimitError) as failure:
+        with pytest.raises(SessionLimitError) as failure:
             await service.assert_capacity("session-1", "one-too-many.pdf")
         assert str(ziza_settings.max_documents_per_session) in str(failure.value)
 
@@ -48,9 +50,10 @@ class TestAssertCapacity:
     ) -> None:
         # Re-uploading occupies a slot it has already paid for, so a full
         # session can still refresh what it holds.
-        full = [f"doc{index}.pdf" for index in range(
-            ziza_settings.max_documents_per_session
-        )]
+        full = [
+            f"doc{index}.pdf"
+            for index in range(ziza_settings.max_documents_per_session)
+        ]
         use_documents(monkeypatch, full)
         await service.assert_capacity("session-1", "doc0.pdf")
 
@@ -68,9 +71,10 @@ class TestLimitIsCheckedBeforeExpensiveWork:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A refusal must cost nothing — no extraction, no model calls."""
-        full = [f"doc{index}.pdf" for index in range(
-            ziza_settings.max_documents_per_session
-        )]
+        full = [
+            f"doc{index}.pdf"
+            for index in range(ziza_settings.max_documents_per_session)
+        ]
         use_documents(monkeypatch, full)
 
         def must_not_run(*args: object, **kwargs: object) -> object:
@@ -78,7 +82,7 @@ class TestLimitIsCheckedBeforeExpensiveWork:
 
         monkeypatch.setattr(service, "load_document", must_not_run)
 
-        with pytest.raises(service.SessionLimitError):
+        with pytest.raises(SessionLimitError):
             await service.ingest_file(
                 session_id="session-1",
                 filename="new.pdf",
@@ -90,9 +94,10 @@ class TestLimitIsCheckedBeforeExpensiveWork:
     async def test_rejected_url_is_never_fetched(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        full = [f"doc{index}.pdf" for index in range(
-            ziza_settings.max_documents_per_session
-        )]
+        full = [
+            f"doc{index}.pdf"
+            for index in range(ziza_settings.max_documents_per_session)
+        ]
         use_documents(monkeypatch, full)
 
         async def must_not_fetch(url: str) -> object:
@@ -100,5 +105,5 @@ class TestLimitIsCheckedBeforeExpensiveWork:
 
         monkeypatch.setattr(service, "fetch_page", must_not_fetch)
 
-        with pytest.raises(service.SessionLimitError):
+        with pytest.raises(SessionLimitError):
             await service.ingest_url("session-1", "https://example.com/page")

@@ -12,8 +12,11 @@ from pydantic_ai.models.test import TestModel
 
 from app.ziza_chat import service
 from app.ziza_chat.agents.followups import (
+    FollowUpCandidate,
     choose_followup,
     get_followup_grader,
+    get_followup_writer,
+    propose_followups,
 )
 from app.ziza_chat.deps import ChatDeps, SearchOutcome
 from app.ziza_chat.schemas import ChatStreamEvent, Suggestion, SuggestionKind
@@ -123,14 +126,17 @@ class TestTheGrader:
         with get_followup_grader().override(
             model=TestModel(custom_output_args={"chosen": None, "reason": "obvious"})
         ):
-            assert await choose_followup("q", "a", ["Q1?", "Q2?"]) is None
+            assert await choose_followup("q", "a", two_candidates()) is None
 
     @pytest.mark.anyio
     async def test_the_chosen_candidate_comes_back(self) -> None:
         with get_followup_grader().override(
             model=TestModel(custom_output_args={"chosen": "Q2?", "reason": "specific"})
         ):
-            assert await choose_followup("q", "a", ["Q1?", "Q2?"]) == "Q2?"
+            chosen = await choose_followup("q", "a", two_candidates())
+            assert chosen is not None
+            assert chosen.question == "Q2?"
+            assert chosen.category == "Second topic"
 
     @pytest.mark.anyio
     async def test_a_question_it_was_not_given_is_refused(self) -> None:
@@ -141,7 +147,18 @@ class TestTheGrader:
                 custom_output_args={"chosen": "Something I made up?", "reason": "x"}
             )
         ):
-            assert await choose_followup("q", "a", ["Q1?", "Q2?"]) is None
+            assert await choose_followup("q", "a", two_candidates()) is None
+
+
+def as_candidate(question: str) -> FollowUpCandidate:
+    return FollowUpCandidate(question=question, category=f"About {question}")
+
+
+def two_candidates() -> list[FollowUpCandidate]:
+    return [
+        FollowUpCandidate(question="Q1?", category="First topic"),
+        FollowUpCandidate(question="Q2?", category="Second topic"),
+    ]
 
 
 def install_followups(
@@ -149,15 +166,18 @@ def install_followups(
 ) -> dict[str, int]:
     calls = {"written": 0, "graded": 0}
 
-    async def write(question: str, answer: str, passages: Sequence[str]) -> list[str]:
+    async def write(
+        question: str, answer: str, passages: Sequence[str]
+    ) -> list[FollowUpCandidate]:
         calls["written"] += 1
-        return list(written)
+        return [as_candidate(text) for text in written]
 
     async def grade(
-        question: str, answer: str, candidates: Sequence[str]
-    ) -> str | None:
+        question: str, answer: str, candidates: Sequence[FollowUpCandidate]
+    ) -> FollowUpCandidate | None:
         calls["graded"] += 1
-        return chosen if chosen in candidates else None
+        offered = {candidate.question: candidate for candidate in candidates}
+        return offered.get(chosen) if chosen else None
 
     monkeypatch.setattr(service, "propose_followups", write)
     monkeypatch.setattr(service, "choose_followup", grade)
@@ -217,20 +237,55 @@ class TestTheWholeDecision:
         assert calls["graded"] == 1, "the grader still sees an empty list and says no"
 
     @pytest.mark.anyio
+    async def test_the_category_reaches_the_suggestion(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The heading is what the visitor reads first, so it has to survive
+        the two filters between the writer and the chip."""
+        install_store(monkeypatch, ["Why did the invoice go up?"])
+
+        async def write(
+            question: str, answer: str, passages: Sequence[str]
+        ) -> list[FollowUpCandidate]:
+            return [
+                FollowUpCandidate(
+                    question="Why did the invoice go up?",
+                    category="Billing changes",
+                )
+            ]
+
+        async def grade(
+            question: str, answer: str, candidates: Sequence[FollowUpCandidate]
+        ) -> FollowUpCandidate | None:
+            return candidates[0] if candidates else None
+
+        monkeypatch.setattr(service, "propose_followups", write)
+        monkeypatch.setattr(service, "choose_followup", grade)
+        offered = await service.suggest_followup(
+            "s", "q", "a", deps_with(searched(2, ["passage"]))
+        )
+        assert len(offered) == 1
+        assert offered[0].category == "Billing changes"
+        assert offered[0].label == "Why did the invoice go up?"
+        assert offered[0].message == "Why did the invoice go up?"
+
+    @pytest.mark.anyio
     async def test_candidates_are_filtered_before_grading(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """The grader must never be able to pick an unanswerable question."""
         install_store(monkeypatch, ["Q1?"])
-        graded: list[Sequence[str]] = []
+        graded: list[list[str]] = []
 
-        async def write(question: str, answer: str, passages: Sequence[str]) -> list[str]:
-            return ["Q1?", "Q2?"]
+        async def write(
+            question: str, answer: str, passages: Sequence[str]
+        ) -> list[FollowUpCandidate]:
+            return [as_candidate("Q1?"), as_candidate("Q2?")]
 
         async def grade(
-            question: str, answer: str, candidates: Sequence[str]
-        ) -> str | None:
-            graded.append(list(candidates))
+            question: str, answer: str, candidates: Sequence[FollowUpCandidate]
+        ) -> FollowUpCandidate | None:
+            graded.append([candidate.question for candidate in candidates])
             return None
 
         monkeypatch.setattr(service, "propose_followups", write)
@@ -247,8 +302,10 @@ class TestTheWholeDecision:
         """The grader is a second provider; its outage must not reach the chat."""
         install_store(monkeypatch, ["Q1?"])
 
-        async def write(question: str, answer: str, passages: Sequence[str]) -> list[str]:
-            return ["Q1?"]
+        async def write(
+            question: str, answer: str, passages: Sequence[str]
+        ) -> list[FollowUpCandidate]:
+            return [as_candidate("Q1?")]
 
         async def explode(*args: Any, **kwargs: Any) -> str | None:
             raise RuntimeError("provider is down")
@@ -274,9 +331,7 @@ class TestTheWireFormat:
             ChatStreamEvent(
                 type="chat.suggestions",
                 suggestions=[
-                    Suggestion(
-                        kind=SuggestionKind.ASK, label="Q?", message="Q?"
-                    )
+                    Suggestion(kind=SuggestionKind.ASK, label="Q?", message="Q?")
                 ],
             )
         )
@@ -368,3 +423,69 @@ class TestTheStream:
         streamed = "".join(event.chunk or "" for event in events)
         assert recorder.seen == [("what can you do?", streamed)]
         assert streamed
+
+
+class TestTheCategoryIsWrittenWithItsQuestion:
+    @pytest.mark.anyio
+    async def test_trailing_punctuation_is_stripped(self) -> None:
+        with get_followup_writer().override(
+            model=TestModel(
+                custom_output_args={
+                    "questions": [
+                        {"question": " Why did it go up? ", "category": " Billing: "}
+                    ]
+                }
+            )
+        ):
+            written = await propose_followups("q", "a", ["passage"])
+        assert written == [
+            FollowUpCandidate(question="Why did it go up?", category="Billing")
+        ]
+
+    @pytest.mark.anyio
+    async def test_a_candidate_missing_either_half_is_dropped(self) -> None:
+        with get_followup_writer().override(
+            model=TestModel(
+                custom_output_args={
+                    "questions": [
+                        {"question": "Kept?", "category": "Topic"},
+                        {"question": "No category?", "category": "   "},
+                        {"question": "   ", "category": "Orphan heading"},
+                    ]
+                }
+            )
+        ):
+            written = await propose_followups("q", "a", ["passage"])
+        assert [candidate.question for candidate in written] == ["Kept?"]
+
+    @pytest.mark.anyio
+    async def test_the_grader_cannot_move_a_heading_onto_another_question(
+        self,
+    ) -> None:
+        """The grader only ever names a question; the heading travels with it."""
+        with get_followup_grader().override(
+            model=TestModel(custom_output_args={"chosen": "Q1?", "reason": "x"})
+        ):
+            chosen = await choose_followup("q", "a", two_candidates())
+        assert chosen is not None
+        assert (chosen.question, chosen.category) == ("Q1?", "First topic")
+
+
+class TestAPunctuationOnlyCategoryIsNotAHeading:
+    @pytest.mark.anyio
+    async def test_a_category_emptied_by_stripping_drops_the_candidate(self) -> None:
+        """"..." survives a truthiness check on the raw text and is emptied by
+        the strip that follows, which would render as a blank line."""
+        with get_followup_writer().override(
+            model=TestModel(
+                custom_output_args={
+                    "questions": [
+                        {"question": "Kept?", "category": "Real topic"},
+                        {"question": "Dropped?", "category": "..."},
+                        {"question": "Also dropped?", "category": ":;,"},
+                    ]
+                }
+            )
+        ):
+            written = await propose_followups("q", "a", ["passage"])
+        assert [candidate.question for candidate in written] == ["Kept?"]

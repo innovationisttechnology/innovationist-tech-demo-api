@@ -1,5 +1,3 @@
-
-
 from functools import lru_cache
 from typing import TYPE_CHECKING, Protocol
 
@@ -24,7 +22,6 @@ class Embedder(Protocol):
 
 
 class FastEmbedEmbedder:
-
     def __init__(self, model_id: str) -> None:
         self._model_id = model_id
         self._model: TextEmbedding | None = None
