@@ -89,6 +89,7 @@ def get_chat_agent() -> Agent[ChatDeps, ChatOutput]:
     # noinspection PyTypeChecker
     agent = Agent[ChatDeps, ChatOutput](
         ziza_settings.ziza_chat_model,
+        name="ziza_prime",
         deps_type=ChatDeps,
         output_type=CHAT_OUTPUT_SPEC,
         instructions=SYSTEM_PROMPT,

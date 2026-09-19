@@ -6,6 +6,7 @@ for". They are a cold start and nothing else: offered once, retired the moment
 the visitor asks anything, and never offered again in that session.
 """
 
+from types import SimpleNamespace
 from typing import Any, Sequence
 
 import pytest
@@ -14,6 +15,7 @@ from pydantic_ai.models.test import TestModel
 from app.ziza_chat import service
 from app.ziza_chat.agents.starter_questions import (
     MAX_STARTER_QUESTIONS,
+    StarterQuestion,
     get_starter_grader,
     get_starter_question_agent,
     keep_answered,
@@ -36,6 +38,10 @@ class StubStore:
         return [RetrievedChunk(text="a passage", source="handbook.pdf", score=0.7)]
 
 
+def as_starter(question: str) -> StarterQuestion:
+    return StarterQuestion(question=question, category=f"About {question}")
+
+
 def install(
     monkeypatch: pytest.MonkeyPatch,
     written: Sequence[str],
@@ -45,15 +51,17 @@ def install(
 ) -> list[tuple[str, str, list[StoredQuestion]]]:
     stored: list[tuple[str, str, list[StoredQuestion]]] = []
 
-    async def write(document: str, text: str) -> list[str]:
-        return list(written)
+    async def write(document: str, text: str) -> list[StarterQuestion]:
+        return [as_starter(question) for question in written]
 
     async def grade(
-        document: str, text: str, candidates: Sequence[str]
-    ) -> list[str]:
+        document: str, text: str, candidates: Sequence[StarterQuestion]
+    ) -> list[StarterQuestion]:
         if answered is None:
             return list(candidates)
-        return [c for c in candidates if c in answered]
+        return [
+            candidate for candidate in candidates if candidate.question in answered
+        ]
 
     async def store(
         session_id: str, document: str, questions: Sequence[StoredQuestion]
@@ -112,9 +120,19 @@ class TestWritingThem:
             monkeypatch, ["Covered?", "Not covered?"], answerable=["Covered?"]
         )
         await service.starter_questions("s", "handbook.pdf", "text")
-        assert stored == [("s", "handbook.pdf", [StoredQuestion(
-            label="Covered?", message="Covered?"
-        )])]
+        assert stored == [
+            (
+                "s",
+                "handbook.pdf",
+                [
+                    StoredQuestion(
+                        label="Covered?",
+                        message="Covered?",
+                        category="About Covered?",
+                    )
+                ],
+            )
+        ]
 
     @pytest.mark.anyio
     async def test_a_failure_costs_the_questions_not_the_upload(
@@ -134,9 +152,19 @@ class TestTheWriter:
     @pytest.mark.anyio
     async def test_blank_questions_are_discarded(self) -> None:
         with get_starter_question_agent().override(
-            model=TestModel(custom_output_args={"questions": ["  ", "Real?"]})
+            model=TestModel(
+                custom_output_args={
+                    "questions": [
+                        {"question": "  ", "category": "Blank"},
+                        {"question": "Real?", "category": " Real topic: "},
+                    ]
+                }
+            )
         ):
-            assert await propose_starter_questions("d", "text") == ["Real?"]
+            written = await propose_starter_questions("d", "text")
+        assert written == [
+            StarterQuestion(question="Real?", category="Real topic")
+        ]
 
     def test_the_schema_caps_the_count(self) -> None:
         """The cap is in the output schema, so the model is told, not trimmed."""
@@ -285,15 +313,15 @@ class TestDroppingWhatTheDocumentOnlyAsks:
     ) -> None:
         """The local check is free; the grader is a model call. Anything
         retrieval already rejected must not reach it."""
-        graded: list[Sequence[str]] = []
+        graded: list[list[str]] = []
 
-        async def write(document: str, text: str) -> list[str]:
-            return ["Covered?", "Not covered?"]
+        async def write(document: str, text: str) -> list[StarterQuestion]:
+            return [as_starter("Covered?"), as_starter("Not covered?")]
 
         async def grade(
-            document: str, text: str, candidates: Sequence[str]
-        ) -> list[str]:
-            graded.append(list(candidates))
+            document: str, text: str, candidates: Sequence[StarterQuestion]
+        ) -> list[StarterQuestion]:
+            graded.append([candidate.question for candidate in candidates])
             return list(candidates)
 
         async def store(
@@ -308,7 +336,9 @@ class TestDroppingWhatTheDocumentOnlyAsks:
         monkeypatch.setattr(service, "keep_answered", grade)
         monkeypatch.setattr(service, "store_starter_questions", store)
         monkeypatch.setattr(service, "starters_are_wanted", are_wanted)
-        monkeypatch.setattr(service, "get_vector_store", lambda: StubStore(["Covered?"]))
+        monkeypatch.setattr(
+            service, "get_vector_store", lambda: StubStore(["Covered?"])
+        )
         monkeypatch.setattr(service, "is_db_configured", lambda: True)
 
         await service.starter_questions("s", "handbook.pdf", "text")
@@ -331,11 +361,78 @@ class TestTheStarterGrader:
                 custom_output_args={"answered": ["Something I invented?", "Real?"]}
             )
         ):
-            assert await keep_answered("d", "text", ["Real?"]) == ["Real?"]
+            kept = await keep_answered("d", "text", [as_starter("Real?")])
+        assert [candidate.question for candidate in kept] == ["Real?"]
 
     @pytest.mark.anyio
     async def test_answering_none_is_a_real_answer(self) -> None:
         with get_starter_grader().override(
             model=TestModel(custom_output_args={"answered": []})
         ):
-            assert await keep_answered("d", "text", ["A?", "B?"]) == []
+            assert (
+                await keep_answered(
+                    "d", "text", [as_starter("A?"), as_starter("B?")]
+                )
+                == []
+            )
+
+
+class TestTheCategoryReachesTheCard:
+    @pytest.mark.anyio
+    async def test_a_written_question_keeps_its_heading(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install(monkeypatch, ["Covered?"])
+        offered = await service.starter_questions("s", "handbook.pdf", "text")
+        assert [(s.label, s.category) for s in offered] == [
+            ("Covered?", "About Covered?")
+        ]
+
+    @pytest.mark.anyio
+    async def test_the_grader_cannot_move_a_heading_between_questions(self) -> None:
+        candidates = [
+            StarterQuestion(question="A?", category="First area"),
+            StarterQuestion(question="B?", category="Second area"),
+        ]
+        with get_starter_grader().override(
+            model=TestModel(custom_output_args={"answered": ["B?"]})
+        ):
+            kept = await keep_answered("d", "text", candidates)
+        assert [(c.question, c.category) for c in kept] == [("B?", "Second area")]
+
+    @pytest.mark.anyio
+    async def test_questions_stored_before_headings_existed_still_read_back(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sessions live until their TTL, so documents written by the previous
+        version have no category and must not fail to load."""
+
+        async def stored_without_category(session_id: str) -> object:
+            return SimpleNamespace(
+                document="handbook.pdf",
+                conversation_started=False,
+                questions=[StoredQuestion(label="Old?", message="Old?")],
+            )
+
+        monkeypatch.setattr(service, "load_starters", stored_without_category)
+        response = await service.latest_starter_questions("s")
+        assert [(s.label, s.category) for s in response.suggestions] == [
+            ("Old?", None)
+        ]
+
+
+class TestAPunctuationOnlyCategoryIsNotAHeading:
+    @pytest.mark.anyio
+    async def test_a_category_emptied_by_stripping_drops_the_candidate(self) -> None:
+        with get_starter_question_agent().override(
+            model=TestModel(
+                custom_output_args={
+                    "questions": [
+                        {"question": "Kept?", "category": "Real area"},
+                        {"question": "Dropped?", "category": "..."},
+                    ]
+                }
+            )
+        ):
+            written = await propose_starter_questions("d", "text")
+        assert [candidate.question for candidate in written] == ["Kept?"]

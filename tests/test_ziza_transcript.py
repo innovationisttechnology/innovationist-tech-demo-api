@@ -122,9 +122,7 @@ class TestTheResponse:
     async def test_turns_come_back_in_order(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def load(
-            session_id: str, limit: int, before: Any
-        ) -> TranscriptPage:
+        async def load(session_id: str, limit: int, before: Any) -> TranscriptPage:
             return page(
                 TranscriptTurn(id="t1-0", role="user", text="first", at=AT),
                 TranscriptTurn(id="t1-1", role="assistant", text="second", at=AT),
@@ -143,9 +141,7 @@ class TestTheResponse:
     async def test_more_to_come_carries_the_cursor(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def load(
-            session_id: str, limit: int, before: Any
-        ) -> TranscriptPage:
+        async def load(session_id: str, limit: int, before: Any) -> TranscriptPage:
             return page(
                 TranscriptTurn(id="t2-0", role="user", text="newest", at=AT),
                 has_more=True,
@@ -162,9 +158,7 @@ class TestTheResponse:
     ) -> None:
         asked: list[tuple[int, Any]] = []
 
-        async def load(
-            session_id: str, limit: int, before: Any
-        ) -> TranscriptPage:
+        async def load(session_id: str, limit: int, before: Any) -> TranscriptPage:
             asked.append((limit, before))
             return page()
 

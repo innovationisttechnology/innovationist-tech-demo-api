@@ -31,21 +31,24 @@ def log_step(session_id: str, step: str, detail: str) -> None:
     )
 
 
+def log_tool_event(session_id: str, event: AgentStreamEvent) -> None:
+    if isinstance(event, FunctionToolCallEvent):
+        log_step(
+            session_id,
+            "tool→",
+            f"{event.part.tool_name}({summarize(event.part.args)})",
+        )
+    elif isinstance(event, FunctionToolResultEvent):
+        outcome = "retry" if isinstance(event.part, RetryPromptPart) else "←tool"
+        log_step(
+            session_id,
+            outcome,
+            f"{event.part.tool_name} -> {summarize(event.part.content)}",
+        )
+
+
 async def log_tool_events(
     context: RunContext[ChatDeps], events: AsyncIterable[AgentStreamEvent]
 ) -> None:
-    session_id = context.deps.session_id
     async for event in events:
-        if isinstance(event, FunctionToolCallEvent):
-            log_step(
-                session_id,
-                "tool→",
-                f"{event.part.tool_name}({summarize(event.part.args)})",
-            )
-        elif isinstance(event, FunctionToolResultEvent):
-            outcome = "retry" if isinstance(event.part, RetryPromptPart) else "←tool"
-            log_step(
-                session_id,
-                outcome,
-                f"{event.part.tool_name} -> {summarize(event.part.content)}",
-            )
+        log_tool_event(context.deps.session_id, event)

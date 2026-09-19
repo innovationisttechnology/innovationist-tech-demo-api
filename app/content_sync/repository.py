@@ -31,9 +31,7 @@ async def find_active_flag(session_id: str, key: str) -> Optional[SyncFlag]:
     )
 
 
-async def create_flag(
-    session_id: str, key: str, value: str, enabled: bool
-) -> SyncFlag:
+async def create_flag(session_id: str, key: str, value: str, enabled: bool) -> SyncFlag:
     flag = SyncFlag(session_id=session_id, key=key, value=value, enabled=enabled)
     await flag.insert()
     return flag

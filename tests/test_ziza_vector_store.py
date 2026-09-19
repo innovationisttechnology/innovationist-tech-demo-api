@@ -196,7 +196,9 @@ class TestPrepareChunks:
     def test_a_url_and_its_summary_are_one_document(self) -> None:
         url = "https://example.com/guide"
         sections = [
-            DocumentSection(text="Page body. " * 20, source=f"Guide ({url})", document=url),
+            DocumentSection(
+                text="Page body. " * 20, source=f"Guide ({url})", document=url
+            ),
             DocumentSection(
                 text="Overview of the guide. " * 20,
                 source=f"Guide ({url}) [summary]",

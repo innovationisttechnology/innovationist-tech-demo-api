@@ -82,12 +82,25 @@ class MeanIntentEntailment(Evaluator[str, ClassifyResult]):
 CASES = [
     Case(name="greeting", inputs="Hi there! How's it going?"),
     Case(name="question", inputs="Who is Sarah from the platform team?"),
-    Case(name="complaint", inputs="The sync feature is broken again, this is really frustrating."),
-    Case(name="task_request", inputs="Can you summarize the onboarding document for me?"),
-    Case(name="clarification", inputs="What did you mean by 'replica set' in your last answer?"),
-    Case(name="feedback", inputs="Thanks, that explanation was really clear and helpful!"),
+    Case(
+        name="complaint",
+        inputs="The sync feature is broken again, this is really frustrating.",
+    ),
+    Case(
+        name="task_request", inputs="Can you summarize the onboarding document for me?"
+    ),
+    Case(
+        name="clarification",
+        inputs="What did you mean by 'replica set' in your last answer?",
+    ),
+    Case(
+        name="feedback", inputs="Thanks, that explanation was really clear and helpful!"
+    ),
     Case(name="identity", inputs="What exactly are you? Some kind of bot?"),
-    Case(name="mixed_complaint_task", inputs="This report is wrong. Regenerate it with last month's numbers."),
+    Case(
+        name="mixed_complaint_task",
+        inputs="This report is wrong. Regenerate it with last month's numbers.",
+    ),
 ]
 
 dataset: Dataset[str, ClassifyResult] = Dataset(
@@ -105,8 +118,9 @@ class ScopeMatches(Evaluator[str, ClassifyResult]):
         return EvaluationReason(
             value=expected is not None and actual is expected.scope,
             reason=(
-                f"scope={actual.value!r} "
-                f"(expected {expected.scope.value!r})" if expected else "no expectation"
+                f"scope={actual.value!r} (expected {expected.scope.value!r})"
+                if expected
+                else "no expectation"
             ),
         )
 
@@ -178,7 +192,9 @@ SCOPE_CASES = [
         False,
         mentioned_url="https://example.com/docs/guide",
     ),
-    scope_case("clear_material", "Delete everything I've uploaded", Scope.ASSISTANT, False),
+    scope_case(
+        "clear_material", "Delete everything I've uploaded", Scope.ASSISTANT, False
+    ),
     scope_case(
         "named_document",
         "What does the handbook say about releases?",
@@ -196,7 +212,10 @@ SCOPE_CASES = [
         "vague_this_file", "What is this file about?", Scope.KNOWLEDGE_BASE, True
     ),
     scope_case(
-        "mixed", "Summarise the handbook, then explain gravity.", Scope.KNOWLEDGE_BASE, True
+        "mixed",
+        "Summarise the handbook, then explain gravity.",
+        Scope.KNOWLEDGE_BASE,
+        True,
     ),
     scope_case(
         "bare_domain",
@@ -219,9 +238,7 @@ SCOPE_CASES = [
         False,
         mentioned_url="acme.co.uk/pricing",
     ),
-    scope_case(
-        "library_is_not_a_url", "What is node.js?", Scope.OUT_OF_SCOPE, False
-    ),
+    scope_case("library_is_not_a_url", "What is node.js?", Scope.OUT_OF_SCOPE, False),
     scope_case(
         "filename_is_not_a_url",
         "Summarise report.md",

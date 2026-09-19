@@ -97,7 +97,9 @@ class TestHtmlExtraction:
         assert "bare text with no tags" in text
 
     def test_title_extracted_from_html_only(self) -> None:
-        assert extract_title(b"<html><title> Docs </title></html>", "text/html") == "Docs"
+        assert (
+            extract_title(b"<html><title> Docs </title></html>", "text/html") == "Docs"
+        )
         assert extract_title(b"%PDF-1.7", "application/pdf") == ""
 
 

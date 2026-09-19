@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 class StoredQuestion(BaseModel):
     label: str
     message: str
+    # Optional because sessions that stored their questions before headings
+    # existed are still live until their TTL expires, and a required field
+    # would make every one of them unreadable.
+    category: str | None = None
 
 
 class SessionStarters(Document):
@@ -82,7 +86,9 @@ async def store_starter_questions(
         existing.created_at = utc_now()
         await existing.save()
     except Exception as failure:
-        logger.warning("Could not store starter questions for %s: %s", document, failure)
+        logger.warning(
+            "Could not store starter questions for %s: %s", document, failure
+        )
 
 
 async def mark_conversation_started(session_id: str) -> None:

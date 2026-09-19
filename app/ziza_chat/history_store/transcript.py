@@ -55,9 +55,7 @@ def to_transcript(
 
     def record(role: Literal["user", "assistant"], text: str) -> None:
         turns.append(
-            TranscriptTurn(
-                id=f"{turn_id}-{len(turns)}", role=role, text=text, at=at
-            )
+            TranscriptTurn(id=f"{turn_id}-{len(turns)}", role=role, text=text, at=at)
         )
 
     for message in messages:

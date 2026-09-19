@@ -9,8 +9,6 @@ from app.core.utils.time import utc_now
 
 
 class KnowledgeChunk(Document):
-
-
     session_id: str
     # The uploaded file or URL this came from. `source` is finer-grained
     # ("handbook.pdf (page 3)"), so counting sources would count one PDF many
@@ -34,7 +32,6 @@ class KnowledgeChunk(Document):
                 [("session_id", 1), ("text_hash", 1)],
                 name="session_chunk_hashes",
             ),
-
             IndexModel(
                 [("created_at", 1)],
                 name="ttl_idle_chunks",

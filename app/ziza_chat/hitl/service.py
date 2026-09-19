@@ -145,9 +145,7 @@ def locate_call(
                 f"{tool_call_id} is awaiting a {call.kind.value}, not a {kind.value}."
             )
         if call.resolution is not None:
-            raise UnknownDeferredCallError(
-                f"{tool_call_id} has already been answered."
-            )
+            raise UnknownDeferredCallError(f"{tool_call_id} has already been answered.")
         return call
     raise UnknownDeferredCallError(
         f"{tool_call_id} is not awaiting a response for this session."

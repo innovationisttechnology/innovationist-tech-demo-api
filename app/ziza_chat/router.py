@@ -6,6 +6,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.db import RequiresDatabase
+from app.core.exceptions import MODEL_UNAVAILABLE_MESSAGE
 from app.ziza_chat import service
 from app.ziza_chat.document_loaders import UnsupportedDocumentError
 from app.ziza_chat.history_store.service import (
@@ -19,6 +20,7 @@ from app.ziza_chat.schemas import (
     ChatHistoryResponse,
     ChatRequest,
     ChatResponse,
+    ChatStreamEvent,
     KnowledgeClearResponse,
     KnowledgeIngestResponse,
     KnowledgeSourcesResponse,
@@ -29,9 +31,7 @@ from app.ziza_chat.utils import format_sse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(
-    prefix="/ziza", tags=["ziza-ai"], dependencies=[RequiresDatabase]
-)
+router = APIRouter(prefix="/ziza", tags=["ziza-ai"], dependencies=[RequiresDatabase])
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -42,8 +42,17 @@ async def chat_endpoint(body: ChatRequest) -> ChatResponse:
 @router.post("/chat/stream")
 async def chat_stream_endpoint(body: ChatRequest) -> StreamingResponse:
     async def event_generator() -> AsyncIterator[str]:
-        async for event in service.stream_chat(body):
-            yield format_sse(event)
+        # The response has already begun, so a failure here can no longer reach
+        # the exception handlers — an unreported one just kills the connection.
+        try:
+            async for event in service.stream_chat(body):
+                yield format_sse(event)
+        except Exception:
+            logger.exception("streaming chat failed for %s", body.session_id)
+            yield format_sse(
+                ChatStreamEvent(type="chat.chunk", chunk=MODEL_UNAVAILABLE_MESSAGE)
+            )
+            yield format_sse(ChatStreamEvent(type="chat.error"))
 
     return StreamingResponse(
         event_generator(),
@@ -93,9 +102,7 @@ async def chat_link_selection_endpoint(body: LinkSelectionRequest) -> ChatRespon
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
-@router.post(
-    "/knowledge/file", response_model=KnowledgeIngestResponse, status_code=201
-)
+@router.post("/knowledge/file", response_model=KnowledgeIngestResponse, status_code=201)
 async def ingest_file_endpoint(
     session_id: Annotated[str, Form(min_length=1)],
     file: Annotated[UploadFile, File()],
@@ -140,6 +147,4 @@ async def list_sources_endpoint(session_id: str) -> KnowledgeSourcesResponse:
 @router.delete("/knowledge/{session_id}", response_model=KnowledgeClearResponse)
 async def clear_knowledge_endpoint(session_id: str) -> KnowledgeClearResponse:
     chunks_deleted = await clear_knowledge(session_id)
-    return KnowledgeClearResponse(
-        session_id=session_id, chunks_deleted=chunks_deleted
-    )
+    return KnowledgeClearResponse(session_id=session_id, chunks_deleted=chunks_deleted)

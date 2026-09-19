@@ -74,9 +74,7 @@ def looks_like_text(data: bytes) -> bool:
     return decoded.count("�") / len(decoded) <= MAX_REPLACEMENT_RATIO
 
 
-def detect_media_type(
-    data: bytes, filename: str, declared: str | None = None
-) -> str:
+def detect_media_type(data: bytes, filename: str, declared: str | None = None) -> str:
     """Decide the type from the file's *contents*, not its name.
 
     A filename and a client-supplied content type are both attacker-controlled,

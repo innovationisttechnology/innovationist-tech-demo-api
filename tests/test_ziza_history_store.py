@@ -4,7 +4,7 @@ Serialization is a pure round-trip, and the service wiring is exercised with a
 stub store and TestModel — so none of this needs MongoDB or a provider.
 """
 
-from typing import Any, Sequence
+from typing import Any, AsyncIterator, Sequence
 
 import pytest
 from pydantic_ai.messages import (
@@ -15,6 +15,12 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
+)
+from pydantic_ai.models.function import (
+    AgentInfo,
+    DeltaToolCall,
+    DeltaToolCalls,
+    FunctionModel,
 )
 from pydantic_ai.models.test import TestModel
 
@@ -33,7 +39,10 @@ from app.ziza_chat.history_store.repair import (
     drop_unresolved_tool_calls,
     last_visitor_message,
 )
-from app.ziza_chat.history_store.store import build_declined_turn
+from app.ziza_chat.history_store.store import (
+    MongoHistoryStore,
+    build_declined_turn,
+)
 from app.ziza_chat.history_store.summary import (
     SUMMARY_HEADER,
     build_summary_turn,
@@ -46,6 +55,7 @@ from app.ziza_chat.history_store.trimming import (
     trim_to_recent_turns,
     turn_start_indexes,
     turns_to_drop,
+    turns_to_summarise,
 )
 from app.ziza_chat.schemas import ChatRequest
 
@@ -76,9 +86,7 @@ class StubHistoryStore:
     async def load(self, session_id: str) -> list[ModelMessage]:
         return self.history
 
-    async def append(
-        self, session_id: str, messages: Sequence[ModelMessage]
-    ) -> None:
+    async def append(self, session_id: str, messages: Sequence[ModelMessage]) -> None:
         self.appended.append(list(messages))
 
     async def clear(self, session_id: str) -> int:
@@ -352,6 +360,65 @@ class TestStreamPersistsHistory:
         assert len(store.appended) == 1
 
 
+PREAMBLE = "Let me search your documents for that. "
+
+GROUNDED_ANSWER = "Sarah leads engineering, per handbook.pdf."
+
+
+async def preamble_then_search(
+    messages: list[ModelMessage], info: AgentInfo
+) -> AsyncIterator[str | DeltaToolCalls]:
+    if len(messages) == 1:
+        yield PREAMBLE
+        yield {
+            0: DeltaToolCall(
+                name="search_knowledge_base",
+                json_args='{"query": "Sarah"}',
+                tool_call_id="call-1",
+            )
+        }
+    else:
+        yield GROUNDED_ANSWER
+
+
+class TestAPreambleDoesNotEndTheTurn:
+    @pytest.mark.anyio
+    async def test_the_answer_after_the_tool_call_is_streamed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_history_store(monkeypatch)
+        install_classification(monkeypatch)
+        with get_chat_agent().override(
+            model=FunctionModel(stream_function=preamble_then_search)
+        ):
+            chunks = [
+                event.chunk or ""
+                async for event in service.stream_chat(
+                    ChatRequest(session_id="session-1", message="who is Sarah?")
+                )
+                if event.type == "chat.chunk"
+            ]
+        assert "".join(chunks) == PREAMBLE + GROUNDED_ANSWER
+
+    @pytest.mark.anyio
+    async def test_the_stored_turn_holds_both_responses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = install_history_store(monkeypatch)
+        install_classification(monkeypatch)
+        with get_chat_agent().override(
+            model=FunctionModel(stream_function=preamble_then_search)
+        ):
+            async for _ in service.stream_chat(
+                ChatRequest(session_id="session-1", message="who is Sarah?")
+            ):
+                pass
+        stored_turn = store.appended[0]
+        assert GROUNDED_ANSWER in "".join(
+            visible_text(message) for message in stored_turn
+        )
+
+
 class TestClearingTakesTheTranscript:
     @pytest.mark.anyio
     async def test_clearing_the_knowledge_base_clears_the_conversation(
@@ -440,10 +507,14 @@ class TestTrimming:
                     if isinstance(part, ToolReturnPart):
                         assert part.tool_call_id in offered_call_ids
 
-    def test_the_cut_point_holds_still_between_steps_so_the_cache_survives(self) -> None:
+    def test_the_cut_point_holds_still_between_steps_so_the_cache_survives(
+        self,
+    ) -> None:
         first_kept = {
             turn_count: visible_text(trim_to_recent_turns(transcript(turn_count))[0])
-            for turn_count in range(MAX_PROMPT_TURNS + 1, MAX_PROMPT_TURNS + TRIM_STEP_TURNS + 1)
+            for turn_count in range(
+                MAX_PROMPT_TURNS + 1, MAX_PROMPT_TURNS + TRIM_STEP_TURNS + 1
+            )
         }
         assert len(set(first_kept.values())) == 1
 
@@ -475,7 +546,9 @@ class TestTrimming:
             assert len(band) == 1
 
     def test_nothing_is_dropped_before_the_limit_is_reached(self) -> None:
-        assert all(turns_to_drop(total) == 0 for total in range(1, MAX_PROMPT_TURNS + 1))
+        assert all(
+            turns_to_drop(total) == 0 for total in range(1, MAX_PROMPT_TURNS + 1)
+        )
 
     def test_the_newest_turn_is_never_dropped(self) -> None:
         assert all(turns_to_drop(total) < total for total in range(1, 61))
@@ -489,7 +562,9 @@ class FoldedSummary:
         return self.text
 
 
-def install_summariser(monkeypatch: pytest.MonkeyPatch, text: str = "folded") -> list[tuple[str, str]]:
+def install_summariser(
+    monkeypatch: pytest.MonkeyPatch, text: str = "folded"
+) -> list[tuple[str, str]]:
     calls: list[tuple[str, str]] = []
 
     async def fake_fold(previous: str, transcript: str) -> FoldedSummary:
@@ -532,16 +607,113 @@ class TestRenderTranscript:
         assert "Assistant: Sarah leads platform (handbook.txt)." in rendered
 
 
+class StubbedMongoStore(MongoHistoryStore):
+    def __init__(self, stored_turns: int, summary: StoredSummary | None = None) -> None:
+        self.stored_turns = stored_turns
+        self.summary = summary
+        self.skipped: list[int] = []
+
+    async def count_turns(self, session_id: str) -> int:  # type: ignore[override]
+        return self.stored_turns
+
+    async def load_summary(  # type: ignore[override]
+        self, session_id: str
+    ) -> StoredSummary | None:
+        return self.summary
+
+    async def load_turns(  # type: ignore[override]
+        self, session_id: str, skip: int
+    ) -> list[ModelMessage]:
+        self.skipped.append(skip)
+        return transcript(self.stored_turns)[skip * len(tool_using_turn(1)) :]
+
+
+def questions_in(messages: Sequence[ModelMessage]) -> list[str]:
+    return [
+        part.content
+        for message in messages
+        if isinstance(message, ModelRequest) and not is_summary_turn(message)
+        for part in message.parts
+        if isinstance(part, UserPromptPart) and isinstance(part.content, str)
+    ]
+
+
+class TestTheSummaryCoversEveryDroppedTurn:
+    def test_the_budget_allows_for_the_message_being_answered(self) -> None:
+        assert turns_to_summarise(MAX_PROMPT_TURNS - 1) == 0
+        assert turns_to_summarise(MAX_PROMPT_TURNS) == TRIM_STEP_TURNS
+
+    @pytest.mark.anyio
+    async def test_nothing_is_dropped_while_no_summary_covers_it(self) -> None:
+        store = StubbedMongoStore(MAX_PROMPT_TURNS, summary=None)
+        loaded = await store.load("session-1")
+        assert store.skipped == [0]
+        assert len(questions_in(loaded)) == MAX_PROMPT_TURNS
+
+    @pytest.mark.anyio
+    async def test_only_what_the_summary_covers_is_dropped(self) -> None:
+        store = StubbedMongoStore(
+            MAX_PROMPT_TURNS,
+            summary=StoredSummary("turns 1-5", covers_turns=TRIM_STEP_TURNS),
+        )
+        loaded = await store.load("session-1")
+        assert store.skipped == [TRIM_STEP_TURNS]
+        assert is_summary_turn(loaded[0])
+        assert questions_in(loaded) == [
+            f"question {number}"
+            for number in range(TRIM_STEP_TURNS + 1, MAX_PROMPT_TURNS + 1)
+        ]
+
+    @pytest.mark.anyio
+    async def test_a_summary_lagging_behind_the_budget_still_leaves_no_gap(
+        self,
+    ) -> None:
+        store = StubbedMongoStore(
+            MAX_PROMPT_TURNS + TRIM_STEP_TURNS,
+            summary=StoredSummary("turns 1-5 only", covers_turns=TRIM_STEP_TURNS),
+        )
+        loaded = await store.load("session-1")
+        assert store.skipped == [TRIM_STEP_TURNS]
+        assert questions_in(loaded)[0] == f"question {TRIM_STEP_TURNS + 1}"
+
+    @pytest.mark.anyio
+    async def test_the_prompt_processor_finds_nothing_left_to_cut(self) -> None:
+        for stored in range(MAX_PROMPT_TURNS, MAX_PROMPT_TURNS + 20):
+            covered = turns_to_summarise(stored)
+            store = StubbedMongoStore(
+                stored, summary=StoredSummary("earlier", covers_turns=covered)
+            )
+            loaded = await store.load("session-1")
+            incoming: list[ModelMessage] = [
+                ModelRequest(parts=[UserPromptPart(content="the new question")])
+            ]
+            assert trim_to_recent_turns(loaded + incoming) == loaded + incoming
+
+
 class TestRefreshSummary:
     @pytest.mark.anyio
     async def test_nothing_happens_before_any_turn_drops(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        store = install_history_store(monkeypatch, total_turns=MAX_PROMPT_TURNS)
+        store = install_history_store(monkeypatch, total_turns=MAX_PROMPT_TURNS - 1)
         calls = install_summariser(monkeypatch)
         await history_service.refresh_summary("session-1")
         assert calls == []
         assert store.saved == []
+
+    @pytest.mark.anyio
+    async def test_it_summarises_as_soon_as_the_next_reply_would_drop_a_turn(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = install_history_store(
+            monkeypatch,
+            total_turns=MAX_PROMPT_TURNS,
+            turn_range=conversation(),
+        )
+        calls = install_summariser(monkeypatch, "the gist")
+        await history_service.refresh_summary("session-1")
+        assert calls
+        assert store.saved == [("the gist", TRIM_STEP_TURNS)]
 
     @pytest.mark.anyio
     async def test_it_folds_only_the_newly_dropped_turns(

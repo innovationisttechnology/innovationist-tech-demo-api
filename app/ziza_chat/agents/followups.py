@@ -22,6 +22,10 @@ MAX_CANDIDATES = 5
 
 MAX_PASSAGE_CHARS = 6_000
 
+# The heading renders uppercase in a narrow column, so a long one wraps or
+# truncates before the question it is meant to introduce.
+MAX_CATEGORY_CHARS = 40
+
 WRITER_PROMPT = """\
 You write follow-up questions for a visitor reading an answer drawn from their
 own uploaded documents.
@@ -55,7 +59,21 @@ What to avoid:
 
 Return up to five, ordered best first. Returning fewer is better than padding,
 and returning none is correct when the material genuinely offers nothing worth
-asking. An empty list is a real answer, not a failure."""
+asking. An empty list is a real answer, not a failure.
+
+Each question also needs a category: two to four words naming the ground the
+question opens, shown above it as a heading.
+
+The category has to earn its place. It is read first and it is the only thing
+a visitor skimming will see, so it must say something the question does not
+already say. Name the territory the answer would move into, not the subject
+the question already states.
+
+For "Why did the invoice amount increase from $69.89 to $74.84?", the category
+is not "Invoice amount" — that is the question's own noun handed back. It is
+"Billing changes" or "Pricing history": where the conversation goes if they
+follow it. Use the document's own vocabulary, no trailing punctuation, and
+never a verb phrase like "Find out more"."""
 
 GRADER_PROMPT = """\
 You decide whether any of several proposed follow-up questions is worth putting
@@ -78,14 +96,32 @@ because it teaches the visitor that these are not worth reading.
 Return the chosen question copied exactly as written, or null."""
 
 
+class FollowUpCandidate(BaseModel):
+    question: str = Field(
+        description=(
+            "The question, phrased the way the visitor would type it. Short and "
+            "direct, no preamble."
+        )
+    )
+    category: str = Field(
+        max_length=MAX_CATEGORY_CHARS,
+        description=(
+            "Two to four words naming the ground this question opens, shown as "
+            "a heading above it. Must say something the question does not — the "
+            "territory the answer moves into, not the subject already named in "
+            "the question. No trailing punctuation."
+        ),
+    )
+
+
 class FollowUpCandidates(BaseModel):
-    questions: list[str] = Field(
+    questions: list[FollowUpCandidate] = Field(
         default_factory=list,
         max_length=MAX_CANDIDATES,
         description=(
             "Follow-up questions answerable from the visitor's documents, best "
-            "first, each phrased as they would type it. Empty when the material "
-            "offers nothing worth asking."
+            "first, each with the category heading it would be shown under. "
+            "Empty when the material offers nothing worth asking."
         ),
     )
 
@@ -108,6 +144,7 @@ class FollowUpChoice(BaseModel):
 def get_followup_writer() -> Agent[None, FollowUpCandidates]:
     return Agent[None, FollowUpCandidates](
         ziza_settings.ziza_followup_model,
+        name="nosy_parker",
         output_type=FollowUpCandidates,
         instructions=WRITER_PROMPT,
         model_settings=ModelSettings(max_tokens=512),
@@ -118,6 +155,7 @@ def get_followup_writer() -> Agent[None, FollowUpCandidates]:
 def get_followup_grader() -> Agent[None, FollowUpChoice]:
     return Agent[None, FollowUpChoice](
         ziza_settings.ziza_suggestion_grader_model,
+        name="the_cynic",
         output_type=FollowUpChoice,
         instructions=GRADER_PROMPT,
         model_settings=ModelSettings(temperature=0, max_tokens=512),
@@ -133,27 +171,52 @@ def build_context(question: str, answer: str, passages: Sequence[str]) -> str:
     )
 
 
+def normalize_category(category: str) -> str:
+    """The heading as it will be shown, or "" for one that is all punctuation.
+
+    Stripping the trailing punctuation can empty a category that looked
+    non-blank, so callers must judge it on this result rather than on the raw
+    text — an empty heading renders as a blank line above the question.
+    """
+    return category.strip().rstrip(".:;,").strip()
+
+
 async def propose_followups(
     question: str, answer: str, passages: Sequence[str]
-) -> list[str]:
-    result = await get_followup_writer().run(
-        build_context(question, answer, passages)
-    )
-    return [text.strip() for text in result.output.questions if text.strip()]
+) -> list[FollowUpCandidate]:
+    result = await get_followup_writer().run(build_context(question, answer, passages))
+    written = [
+        FollowUpCandidate(
+            question=candidate.question.strip(),
+            category=normalize_category(candidate.category),
+        )
+        for candidate in result.output.questions
+    ]
+    return [
+        candidate for candidate in written if candidate.question and candidate.category
+    ]
 
 
 async def choose_followup(
-    question: str, answer: str, candidates: Sequence[str]
-) -> str | None:
+    question: str, answer: str, candidates: Sequence[FollowUpCandidate]
+) -> FollowUpCandidate | None:
     """The best candidate, or None when none of them earns a place.
 
     Only a candidate returned verbatim is accepted: a grader that rewrites what
     it was given has stopped grading and started writing, and its output has
     been through neither the writer's instructions nor the retrieval check.
+
+    The grader judges questions and never sees the categories, so the heading
+    that ends up on screen is the one written alongside the question it
+    introduces — it cannot be swapped onto a different question here.
     """
     if not candidates:
         return None
-    listed = "\n".join(f"{index}. {text}" for index, text in enumerate(candidates, 1))
+    by_question = {candidate.question: candidate for candidate in candidates}
+    listed = "\n".join(
+        f"{index}. {candidate.question}"
+        for index, candidate in enumerate(candidates, 1)
+    )
     result = await get_followup_grader().run(
         f"{build_context(question, answer, [])}\n\nCandidates:\n{listed}"
     )
@@ -161,7 +224,7 @@ async def choose_followup(
     if not chosen:
         logger.info("no follow-up worth showing: %s", result.output.reason)
         return None
-    if chosen not in candidates:
+    if chosen not in by_question:
         logger.warning("grader returned a question it was not given: %r", chosen)
         return None
-    return chosen
+    return by_question[chosen]

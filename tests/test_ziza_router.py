@@ -10,8 +10,14 @@ from typing import Any, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic_ai.exceptions import (
+    ModelHTTPError,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
+)
 
 from app.core.db import dependencies as db_dependencies
+from app.core.exceptions import MODEL_UNAVAILABLE_MESSAGE
 from app.main import app
 from app.ziza_chat import service
 from app.ziza_chat.hitl.models import DeferredKind
@@ -22,19 +28,46 @@ from app.ziza_chat.schemas import ChatResponse, PendingCallRead
 # is what the coverage check below compares against, so a new route cannot be
 # added without a request that proves it is gated.
 DB_GATED_REQUESTS = [
-    ("post", "/api/ziza/chat", "/api/ziza/chat",
-     {"json": {"session_id": "s", "message": "hi"}}),
-    ("post", "/api/ziza/chat/stream", "/api/ziza/chat/stream",
-     {"json": {"session_id": "s", "message": "hi"}}),
+    (
+        "post",
+        "/api/ziza/chat",
+        "/api/ziza/chat",
+        {"json": {"session_id": "s", "message": "hi"}},
+    ),
+    (
+        "post",
+        "/api/ziza/chat/stream",
+        "/api/ziza/chat/stream",
+        {"json": {"session_id": "s", "message": "hi"}},
+    ),
     ("get", "/api/ziza/chat/s/history", "/api/ziza/chat/{session_id}/history", {}),
-    ("post", "/api/ziza/chat/approval", "/api/ziza/chat/approval",
-     {"json": {"session_id": "s", "tool_call_id": "c", "approved": True}}),
-    ("post", "/api/ziza/chat/links", "/api/ziza/chat/links",
-     {"json": {"session_id": "s", "tool_call_id": "c", "selected_links": []}}),
-    ("post", "/api/ziza/knowledge/file", "/api/ziza/knowledge/file",
-     {"data": {"session_id": "s"}, "files": {"file": ("a.txt", b"hi", "text/plain")}}),
-    ("get", "/api/ziza/knowledge/s/suggestions",
-     "/api/ziza/knowledge/{session_id}/suggestions", {}),
+    (
+        "post",
+        "/api/ziza/chat/approval",
+        "/api/ziza/chat/approval",
+        {"json": {"session_id": "s", "tool_call_id": "c", "approved": True}},
+    ),
+    (
+        "post",
+        "/api/ziza/chat/links",
+        "/api/ziza/chat/links",
+        {"json": {"session_id": "s", "tool_call_id": "c", "selected_links": []}},
+    ),
+    (
+        "post",
+        "/api/ziza/knowledge/file",
+        "/api/ziza/knowledge/file",
+        {
+            "data": {"session_id": "s"},
+            "files": {"file": ("a.txt", b"hi", "text/plain")},
+        },
+    ),
+    (
+        "get",
+        "/api/ziza/knowledge/s/suggestions",
+        "/api/ziza/knowledge/{session_id}/suggestions",
+        {},
+    ),
     ("get", "/api/ziza/knowledge/s", "/api/ziza/knowledge/{session_id}", {}),
     ("delete", "/api/ziza/knowledge/s", "/api/ziza/knowledge/{session_id}", {}),
 ]
@@ -231,6 +264,72 @@ class TestStreamFrames:
         assert '"tool_call_id": "call_1"' in response.text
 
 
+class TestAModelFailureIsReported:
+    @pytest.mark.parametrize(
+        "failure,expected_status",
+        [
+            (ModelHTTPError(status_code=529, model_name="m"), 503),
+            (ModelHTTPError(status_code=429, model_name="m"), 429),
+            (UsageLimitExceeded("request limit reached"), 503),
+            (UnexpectedModelBehavior("no output"), 503),
+        ],
+    )
+    def test_the_buffered_route_answers_with_a_status_not_a_500(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        failure: Exception,
+        expected_status: int,
+    ) -> None:
+        allow_db(monkeypatch)
+
+        async def exploding_chat(request: Any) -> ChatResponse:
+            raise failure
+
+        monkeypatch.setattr(service, "chat", exploding_chat)
+        response = client.post(
+            "/api/ziza/chat", json={"session_id": "s", "message": "hi"}
+        )
+        assert response.status_code == expected_status
+        assert response.json()["error"] == "model_unavailable"
+
+    def test_the_provider_is_never_named_in_the_response(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        allow_db(monkeypatch)
+
+        async def exploding_chat(request: Any) -> ChatResponse:
+            raise ModelHTTPError(
+                status_code=529, model_name="anthropic:claude-sonnet-5"
+            )
+
+        monkeypatch.setattr(service, "chat", exploding_chat)
+        response = client.post(
+            "/api/ziza/chat", json={"session_id": "s", "message": "hi"}
+        )
+        assert "anthropic" not in response.text.lower()
+        assert response.json()["message"] == MODEL_UNAVAILABLE_MESSAGE
+
+    def test_a_failure_mid_stream_still_reaches_the_visitor(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.ziza_chat.schemas import ChatStreamEvent
+
+        allow_db(monkeypatch)
+
+        async def failing_stream(request: Any) -> Any:
+            yield ChatStreamEvent(type="chat.chunk", chunk="Let me look")
+            raise ModelHTTPError(status_code=529, model_name="m")
+
+        monkeypatch.setattr(service, "stream_chat", failing_stream)
+        response = client.post(
+            "/api/ziza/chat/stream", json={"session_id": "s", "message": "hi"}
+        )
+        assert response.status_code == 200
+        assert MODEL_UNAVAILABLE_MESSAGE in response.text
+        assert "event: chat.error" in response.text
+
+
 class TestLinkSelectionEndpoint:
     def test_a_selection_returns_the_resumed_answer(
         self, client: TestClient, monkeypatch: pytest.MonkeyPatch
@@ -266,7 +365,9 @@ class TestLinkSelectionEndpoint:
         async def fake_resolve(request: Any) -> ChatResponse:
             assert request.selected_links == []
             return ChatResponse(
-                session_id=request.session_id, response="Indexed.", intent="task request"
+                session_id=request.session_id,
+                response="Indexed.",
+                intent="task request",
             )
 
         monkeypatch.setattr(service, "resolve_link_selection", fake_resolve)

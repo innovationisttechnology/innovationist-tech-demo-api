@@ -55,6 +55,7 @@ class PageSummary(BaseModel):
 def get_page_summary_agent() -> Agent[None, PageSummary]:
     return Agent[None, PageSummary](
         ziza_settings.ziza_summary_model,
+        name="the_skim_reader",
         output_type=PageSummary,
         instructions=SUMMARY_PROMPT,
     )
