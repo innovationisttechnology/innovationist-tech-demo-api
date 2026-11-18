@@ -8,7 +8,3 @@ class ErrorResponse(BaseModel):
     message: str
     status_code: int
     details: Optional[Any] = None
-
-
-class SessionLimitError(Exception):
-    pass

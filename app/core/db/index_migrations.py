@@ -19,10 +19,7 @@ logger = logging.getLogger(__name__)
 # Indexes an earlier version of a model declared, keyed by collection. Beanie
 # leaves these in place, and a stale unique index keeps rejecting writes the
 # current schema allows.
-SUPERSEDED_INDEXES: dict[str, tuple[str, ...]] = {
-    # Captions were keyed on image_hash alone before they were session-scoped.
-    "image_captions": ("uniq_image_hash",),
-}
+SUPERSEDED_INDEXES: dict[str, tuple[str, ...]] = {}
 
 
 def declared_settings(model: Type[Document]) -> Any:
