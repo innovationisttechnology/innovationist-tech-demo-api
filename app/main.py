@@ -1,17 +1,9 @@
-from dotenv import load_dotenv
-
 from app.core.utils.log_config import init_logging
-
-# Provider SDKs (pydantic-ai, etc.) read keys like ANTHROPIC_API_KEY straight
-# from the process environment, which pydantic-settings does not populate —
-# so .env has to be loaded here. Real env vars win, keeping Docker unaffected.
-load_dotenv()
 
 init_logging()
 
 import asyncio
 import logging
-import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
@@ -24,27 +16,16 @@ from app.core.config import settings
 from app.core.db import close_db, init_db, is_db_configured
 from app.core.exceptions import register_exception_handlers
 from app.routes.routes import api_router
-from app.ziza_chat.vector_store.index import ensure_vector_index
 
 logger = logging.getLogger(__name__)
 
 
-def warn_about_missing_provider_key() -> None:
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        logger.error(
-            "ANTHROPIC_API_KEY is not set — the /api/ziza endpoints will fail "
-            "on every request. Set it in the deployment environment."
-        )
-
-
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    warn_about_missing_provider_key()
     watcher_task: asyncio.Task[None] | None = None
     if is_db_configured():
         await init_db()
         logger.info("Database initialized")
-        await ensure_vector_index()
         watcher_task = asyncio.create_task(watch_sync_flags(connection_manager))
     else:
         logger.warning("MONGO_URI not set — running without a database")
